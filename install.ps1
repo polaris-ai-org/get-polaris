@@ -101,7 +101,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Stamped by the release pipeline; 'dev' when run from a working tree.
-$script:BootstrapVersion = '3.0.0'
+$script:BootstrapVersion = '3.0.1'
 
 # --- Constants ----------------------------------------------------------------
 
