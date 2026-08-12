@@ -100,6 +100,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Windows PowerShell decodes native-tool stdout per [Console]::OutputEncoding,
+# which defaults to the OEM codepage - UTF-8 symbols from piped tools (the
+# Claude installer's checkmarks/arrows, winget's block glyphs) degrade into
+# "ÔÜá"/"Ôûê" mojibake (v3.0.2 bare-machine field report). UTF-8 is PowerShell 7's
+# default anyway; intentionally not restored on exit.
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+
 # Stamped by the release pipeline; 'dev' when run from a working tree.
 $script:BootstrapVersion = '3.0.2'
 
@@ -273,9 +280,12 @@ function Get-ToolStatus {
         return [pscustomobject]@{ Status = 'Missing'; Version = '' }
     }
 
-    if ($Tool.MinMajor -and $version) {
+    # Indexer, not member access: only the Node entry defines MinMajor, and a
+    # leaked Set-StrictMode (see the Claude-installer containment note) turns
+    # $Tool.MinMajor on the other entries into PropertyNotFoundStrict.
+    if ($Tool['MinMajor'] -and $version) {
         $major = [int](($version -split '\.')[0])
-        if ($major -lt $Tool.MinMajor) {
+        if ($major -lt $Tool['MinMajor']) {
             return [pscustomobject]@{ Status = 'Outdated'; Version = $version }
         }
     }
@@ -425,7 +435,14 @@ function Invoke-StagePrerequisites {
             $prev = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
             try {
-                Invoke-RestMethod -Uri 'https://claude.ai/install.ps1' -UseBasicParsing | Invoke-Expression | Out-Host
+                # Contained in a child scope on purpose: Anthropic's installer
+                # calls Set-StrictMode, and Invoke-Expression would apply that
+                # to THIS scope - the verify pass below then dies on the first
+                # hashtable member-miss (PropertyNotFoundStrict on MinMajor,
+                # v3.0.2 bare-machine field report). Invoking a scriptblock
+                # keeps their strict mode inside their own scope.
+                $claudeInstaller = Invoke-RestMethod -Uri 'https://claude.ai/install.ps1' -UseBasicParsing
+                & ([scriptblock]::Create($claudeInstaller)) | Out-Host
             } catch {
                 Write-Warn2 "Claude Code installer failed: $($_.Exception.Message)"
                 Write-Warn2 'Install it manually later: irm https://claude.ai/install.ps1 | iex'
@@ -1004,8 +1021,8 @@ Invoke-StageFinish
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB8eNHSBZbJ9TiL
-# XCZYRhnOsNG3+8BfAWQGCKjFgCroWKCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBNrgSUhVjZ1i7J
+# +MO1hBXGvdSwMENAcouAblDBErrNnqCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1079,20 +1096,20 @@ Invoke-StageFinish
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEICVCl+C//i4t
-# PaXHse+Qrsr4y2f6q0Pb+YGxT5PUFVUmMA0GCSqGSIb3DQEBAQUABIIBgFi/2sK3
-# NqwfeJirmFBxxoa57Gu5ykip6us522RyijpxoOXZQP5n+HEEeCXGp1fujMHans+D
-# RgCcdGT8Kh5sJXf3nEgyFKa6KddhoI/+5zSDAUPuNP4d1NAf5lfB2U4cM3P5KHeg
-# SvFGv9mwRUYTt9xNzl1Gj2KI2KdVmAr13Ye3HpZzbdXeIJm9PqPGahQklyWDZPaJ
-# 4VgTBpsRR66YW9O4QdttGmffwdhWoniVPt/qYhbtx1MSNgp1T+pvqae2fJcHHu6O
-# OuZYhKD40gZMuydHtp8R2frFmcDH+9wivSbhzSAAbGvQ/dKWEvTL4PT8VF9qmBxB
-# /bBo/VjLvfrXoiXA/kul/YGHh/d/Ra14i5R17lrQBGzSdboCxSxw41MqIDA6QIb5
-# UR0SQd2YEyybgva8kun2Cx/+6ltW/oFP8Pbnaa2xX60KzXZ8gt5skqbXfYrhixpG
-# NYQKDcyS8k9smXEokYeXrwKo3vHHAEwrkP5ZL65qx789lVnjwYjxyILrNaGCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIG3pXu7QB5ag
+# +rnGQ6gRK/gwDI9zmnpW9QB1aNwxFpmrMA0GCSqGSIb3DQEBAQUABIIBgB+zzZrT
+# WN7LwyaWtabSbHUq56Qud0NlQIMGPDCqiYAjqAxrlnZ9IKurp+Q0NfqnqqfWk2oq
+# ZJmrGeIgJo/iFpGN61gL17X/ayHYE5RCle/brp726B64ZCiWBxKlPu10ZzHSLe1j
+# LevVdtKavt+i0fNDFFp4kKroHWbwn5lpJ8rSvzI3iTqJHMO5tddMCqXRfmSeQWuf
+# N3Q5qJPdbNC1Eb1Z6zap6wa/QjfsuZs1TRH3xFv7uveuPtvcJL86cP5pnWHjYDan
+# 73m6u2lkhMffinXuLu+qE/KcvZTmqp9DR8diNcyfNUR4NyEhdqDD5/xRNtlF8PKM
+# gD7bg4lbnu8XYmFGPJnZ7XrjoXqxBF7Ja4TP44yiRBoNtcM+be0FAdYK28HYfISB
+# t+roRuyRyZi+3zKjQhvYYV/wj2f7+d8dqVTTENdsRdo/CSoIZ8SFdeX8GCe14x4o
+# pOiPRfEXf29yxqDSMMJGvs9UqtqK8W6m0qicYXmXEu1AmyXptcsAV01NN6GCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQgb02csuEGbTBLVNHG9fEaQ3IjgXLEN0m+
-# CeaC3eV4WQsCBwqofG8AgPcYDzIwMjYwODEyMTYwNTE3WjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgojqEgRKzj0DVrK+GbVxQJRyfgjRHjgd0
+# hpkqi6s+AnQCBwqofG8CgAMYDzIwMjYwODEyMTYxMDQyWjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -1200,22 +1217,22 @@ Invoke-StageFinish
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA4MTIxNjA1MTdaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDBx
-# n6JR6nBLHOK9DpfXaPNs2q9FBcX7uN2mBiC2AptskYCMOWXFlN7GWhn21y9hayAw
+# DQEJBTEPFw0yNjA4MTIxNjEwNDJaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDDy
+# 4LZsZY76FffNhmfYmB0a8+KDOnRXMTsH0JOO4DRPyzIz2ROX8CryXai0Wvur49ww
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAlASgwAZuCPsIXxSq
-# x5IDxgcJCV8v3FutRslz9CHZehmpeBbn2adIlxbvVEJ0Ax/DeX4C8xKlMlaDYzEI
-# O2Q+ZO7OSkPuRtFbJ4Dcxw1GOyjv18mIb7rcboxPKChQppDTxht4Xl/+1CN9b2Pl
-# EQOtsfKSQegjHnKxlpLwz2DVdpcOPuk8T197NUcYxoXy2hsUZSCOXlTTHnOy3LIm
-# K6wmfox3QTrtJMARQ2t4o//a88kgMVvKv4hl/ayFEmTrXUD5KuDhtM6db16RqMJW
-# pcBUOtN4OI7aBKRdoJCN953qTNIkK3ZBMtJOmoYQMemvqQzG3JpoiOZ1dIWwznc2
-# jb2T787Nb9Am1fLXGURy81HP+YPaJne9hhqTznGJA4qZhd7s6SthivZqal2mdc51
-# ng/RZ6F+pOCJmew8vq2U3qpD+HMwS/iHRKn7EZnWiaIgs7/utMQ9YSXO+ywJn2Vb
-# ebfa21NJfnNQ5RsKk++RiCCVPyFLuiVhCJfmw7Pnz8VIean0aSdyCV9Av8CWpm7h
-# N8JlyvnP2Z9pPISizNLRmnjy/2ODzKri4SyCjJpxSAONuo1bdgo96rrr7bP7bmGC
-# ZwY8B81GjB4sdTbE4JBMSldghjNEqLd8gm65kyleXMBjK5s2h8t0jm0TeTeAmeBU
-# tWekfeAfp00GVpziUYcMWuzzBo0=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAJ+2SF5rShYllxvNy
+# mY40AWiprWEx0q4RVrSXnpkDs4MGxai0vL6k5jVSZ/O4ycjtPZkxbiAL1GUZ0ydQ
+# atrpkLDqSywJ4t9WCNjisnZlBWGs99T2445PbcMBOnGL1SgkGdWjHdUl99pnCZ7a
+# ULMDRPLtrCXLw8Czf6z+fhzsZC9YF/RngO/vnxcxMo5iYLb95aMIRSUlgJjFF9Tj
+# V50E3svimxsyg5pFud1SIq98ugmSXQOy6Cfr34gEPEIqPw7bL8xUAA84FK7B00BZ
+# yzi+dlfhnQIdc4/9o5KgWIT7HK8EanH5jwotulbkHG71LLD8RlUDxkDkrQJmYB+1
+# 53dNsfQBufwcwhIKeOHBe5pMa7m6g+E+XasgbMP3jJ5XNS23Slrksy0f4AcGfizZ
+# MACZ2qJLi9/VTPpNzOyjevL1fYsRzeKVhZA9D2utEI9HmgV+8mchsmI0chtq4YsM
+# bLdj7cp2Hp587kBuQv8p5tiGL2wBqXymwTymD/0xhAoiMKttepbpIO3zQwW174js
+# gbDXMwcF/o8mdz/Z4hnLDT/d9gNXTsSn1STIA0HH9jFLbzxn4pmUGVi1xLbM1JNI
+# oKlx42Ggm+bVQcKevdK9hDK/f268Ui8Ssgh/xg7p3AJCZ5hZeCAxxFfBZTfDAeOq
+# wzgnGNhNiDV6Z/RTQKV1T/R9nMQ=
 # SIG # End signature block
