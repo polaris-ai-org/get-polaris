@@ -103,8 +103,8 @@ $ErrorActionPreference = 'Stop'
 # Windows PowerShell decodes native-tool stdout per [Console]::OutputEncoding,
 # which defaults to the OEM codepage - UTF-8 symbols from piped tools (the
 # Claude installer's checkmarks/arrows, winget's block glyphs) degrade into
-# "ÔÜá"/"Ôûê" mojibake (v3.0.2 bare-machine field report). UTF-8 is PowerShell 7's
-# default anyway; intentionally not restored on exit.
+# O-circumflex mojibake sequences (v3.0.2 bare-machine field report). UTF-8 is
+# PowerShell 7's default anyway; intentionally not restored on exit.
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
 
 # Stamped by the release pipeline; 'dev' when run from a working tree.
@@ -202,6 +202,24 @@ function Update-SessionPath {
     }
 }
 
+function Out-WingetLine {
+    # winget animates a spinner (- \ | /) and a block-glyph progress bar via
+    # bare carriage-return redraws. Piped (as below), every redraw frame lands
+    # as its own line - hundreds of junk lines per package (v3.0.2 bare-machine
+    # field report). --disable-interactivity does NOT suppress the animations
+    # (verified against winget 1.11), so filter the frames out of the pipeline:
+    # drop lines that are only whitespace/spinner glyphs and lines carrying the
+    # bar's block characters; every informative winget line passes through.
+    process {
+        $line = "$_"
+        if ($line -match '^[\s\\|/-]*$') { return }
+        # Bar glyphs: FULL BLOCK U+2588, LIGHT SHADE U+2591, MEDIUM SHADE
+        # U+2592 - .NET regex unicode escapes keep this file pure ASCII.
+        if ($line -match '[\u2588\u2591\u2592]') { return }
+        Out-Host -InputObject $line
+    }
+}
+
 function Invoke-WingetInstall {
     param([Parameter(Mandatory)][string]$Id, [switch]$Upgrade)
 
@@ -209,24 +227,19 @@ function Invoke-WingetInstall {
     if ($Upgrade) { $verb = 'upgrade' }
     $wingetArgs = @($verb, '--id', $Id, '--exact', '--source', 'winget',
                     '--accept-source-agreements', '--accept-package-agreements',
-                    # No spinner / progress-bar animation: winget redraws them
-                    # with bare carriage returns and Unicode block glyphs, which
-                    # degrade into line-by-line "Ôûê" mojibake spam when the
-                    # output is piped (| Out-Host below) on a console with an
-                    # OEM codepage - bare German Win11, v3.0.2 field report.
-                    # The flag exists since winget 1.4 (2023); App Installer
-                    # auto-updates far past that.
+                    # Suppresses interactive PROMPTS (not the animations - see
+                    # Out-WingetLine for those). Exists since winget 1.4 (2023).
                     '--disable-interactivity')
 
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        winget @wingetArgs --silent | Out-Host
+        winget @wingetArgs --silent | Out-WingetLine
         $code = $LASTEXITCODE
         if ($code -ne 0) {
             # Some installers refuse an unattended run - retry showing their UI.
             Write-Warn2 "winget $verb --silent exited with $code - retrying with the installer UI"
-            winget @wingetArgs | Out-Host
+            winget @wingetArgs | Out-WingetLine
             $code = $LASTEXITCODE
         }
         return $code
@@ -1021,8 +1034,8 @@ Invoke-StageFinish
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBNrgSUhVjZ1i7J
-# +MO1hBXGvdSwMENAcouAblDBErrNnqCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAz+/ZTULb/uf+C
+# N9bGtpAEI+HJdS9dXIsg6GYKbVapkKCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1096,20 +1109,20 @@ Invoke-StageFinish
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIG3pXu7QB5ag
-# +rnGQ6gRK/gwDI9zmnpW9QB1aNwxFpmrMA0GCSqGSIb3DQEBAQUABIIBgB+zzZrT
-# WN7LwyaWtabSbHUq56Qud0NlQIMGPDCqiYAjqAxrlnZ9IKurp+Q0NfqnqqfWk2oq
-# ZJmrGeIgJo/iFpGN61gL17X/ayHYE5RCle/brp726B64ZCiWBxKlPu10ZzHSLe1j
-# LevVdtKavt+i0fNDFFp4kKroHWbwn5lpJ8rSvzI3iTqJHMO5tddMCqXRfmSeQWuf
-# N3Q5qJPdbNC1Eb1Z6zap6wa/QjfsuZs1TRH3xFv7uveuPtvcJL86cP5pnWHjYDan
-# 73m6u2lkhMffinXuLu+qE/KcvZTmqp9DR8diNcyfNUR4NyEhdqDD5/xRNtlF8PKM
-# gD7bg4lbnu8XYmFGPJnZ7XrjoXqxBF7Ja4TP44yiRBoNtcM+be0FAdYK28HYfISB
-# t+roRuyRyZi+3zKjQhvYYV/wj2f7+d8dqVTTENdsRdo/CSoIZ8SFdeX8GCe14x4o
-# pOiPRfEXf29yxqDSMMJGvs9UqtqK8W6m0qicYXmXEu1AmyXptcsAV01NN6GCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIM754EBDeS4d
+# N3BiiQvnBwdezT2N8aanxE33WU5nBX1vMA0GCSqGSIb3DQEBAQUABIIBgGMhe3ps
+# bwzUa1+tNtYq6mrfqUu7WKzzDgER5NCtvnfKNeGzSL/VKQPlF+5CIGYIZ9qCEm8+
+# 2kY8w+KO2cCXw4CTABAVnVAPdCEr5LSjo5EPCL4XZI+zvp39xQ4gms6wvXzTJjnx
+# 03J41JhWPdUeR1lGzIyR1wIYUb6Tvo78XrCmWqrRF4xV5yH+YiABob/TA3XvJo+H
+# 8Luqf3Sf4pEnHm9lZPSQZ+3Pp+Qz/qpMDoYSJYCzumeE8A+PZFDD4R3Tibhio/IY
+# FtJrKJbOlCMt3+UJijiMgKeulTTyXq8EcK/7NQndy+0mTtXOEljDfUi1FWR0kBZ1
+# KNmtPuC1peCkpbELVldb6G/CVXVdEo4f2lt7RLgV12TF3ncLN3l3RzSKIFOL6Q4A
+# 8TFmJqiBmpYC46Ykn6lCEv9xwQXeZz8FFBBqa8PUOCE8e95+utDs8Bp4jpxxIZNU
+# jiGx2lwXFtix5J3L/JdkquAKjwA//W/TyptDLxkdbSGk/74CPbWBgYtuRaGCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQgojqEgRKzj0DVrK+GbVxQJRyfgjRHjgd0
-# hpkqi6s+AnQCBwqofG8CgAMYDzIwMjYwODEyMTYxMDQyWjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgmBZmyKmX4j1qN3DphWdvMC2Exjsvc/mZ
+# Lux2g4z9Nn0CBwqofG8A0GsYDzIwMjYwODEyMTYxODA5WjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -1217,22 +1230,22 @@ Invoke-StageFinish
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA4MTIxNjEwNDJaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDDy
-# 4LZsZY76FffNhmfYmB0a8+KDOnRXMTsH0JOO4DRPyzIz2ROX8CryXai0Wvur49ww
+# DQEJBTEPFw0yNjA4MTIxNjE4MDlaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDA1
+# xF4hNXFB2L/Q1HGInhLgGIomNlN8bDmcc6y+EEbB4aLKMV8n2RMaCieoOKTf0f4w
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAJ+2SF5rShYllxvNy
-# mY40AWiprWEx0q4RVrSXnpkDs4MGxai0vL6k5jVSZ/O4ycjtPZkxbiAL1GUZ0ydQ
-# atrpkLDqSywJ4t9WCNjisnZlBWGs99T2445PbcMBOnGL1SgkGdWjHdUl99pnCZ7a
-# ULMDRPLtrCXLw8Czf6z+fhzsZC9YF/RngO/vnxcxMo5iYLb95aMIRSUlgJjFF9Tj
-# V50E3svimxsyg5pFud1SIq98ugmSXQOy6Cfr34gEPEIqPw7bL8xUAA84FK7B00BZ
-# yzi+dlfhnQIdc4/9o5KgWIT7HK8EanH5jwotulbkHG71LLD8RlUDxkDkrQJmYB+1
-# 53dNsfQBufwcwhIKeOHBe5pMa7m6g+E+XasgbMP3jJ5XNS23Slrksy0f4AcGfizZ
-# MACZ2qJLi9/VTPpNzOyjevL1fYsRzeKVhZA9D2utEI9HmgV+8mchsmI0chtq4YsM
-# bLdj7cp2Hp587kBuQv8p5tiGL2wBqXymwTymD/0xhAoiMKttepbpIO3zQwW174js
-# gbDXMwcF/o8mdz/Z4hnLDT/d9gNXTsSn1STIA0HH9jFLbzxn4pmUGVi1xLbM1JNI
-# oKlx42Ggm+bVQcKevdK9hDK/f268Ui8Ssgh/xg7p3AJCZ5hZeCAxxFfBZTfDAeOq
-# wzgnGNhNiDV6Z/RTQKV1T/R9nMQ=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAPaVHyivPkCIn44Vb
+# 7ZPq1P8DmzhE8P8LGiNgZ/BPOHDxl6of7BJokqRPkf5c/jIQH2MMQu2hvCTTQ/f4
+# Afq4WUPjEiJB1IiCHXWO2EQ/d+95xYQmm+saauk/loGsob/iODd2ek5E3hJSq8UJ
+# P1WsveCy+nNlZ3Hdv79UOKiVdpnWll80tciHeYYMJ+KB1DKL6Y4fSTs+t1uFCIvb
+# JzNqxz2ZmoWmbCFx8P028UshddgTXgbT9tBNBY+7YmXkZC2EC0vHa8gdX8F1c4PU
+# YhK3HG5F1msXn42EGE1wE3vJiUpTRCSXgAtWt8kW7aJTzznnERu9RE5jgsAuKLp4
+# 2v0MuBDGyejvi0NFN5JS5u09ObvDilDOQ0DXoRP0h7YPEa2zQ/mWdNEKt9PxNrD2
+# cNDFoXiwSJlRmL4zahyKq+6ipdK6etruEYQf6FhN4nhUFn/YBKFPTb3OmPWUKeaa
+# nHtTJv1c4M3rKFrRO0Gh/nUf68ZM9j3DESJsTqn9zIo8VW1cO73RJ6LlWfXRdBeq
+# Q15murziXuc/Y1kYaOBQRxUHgcMz1yr72W3vF11olZj7CQq29JcS5GJPgOFfzFb7
+# iK9xTyPEQg3xh7Dtot1NICGxB1XuVz9iE3QR0GdRC8FzBhtirJEBebWhluDKjyK4
+# xlefbq1RgAgFdqLN2Pjfr3l2cRs=
 # SIG # End signature block
