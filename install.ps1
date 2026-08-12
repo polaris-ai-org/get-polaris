@@ -201,7 +201,15 @@ function Invoke-WingetInstall {
     $verb = 'install'
     if ($Upgrade) { $verb = 'upgrade' }
     $wingetArgs = @($verb, '--id', $Id, '--exact', '--source', 'winget',
-                    '--accept-source-agreements', '--accept-package-agreements')
+                    '--accept-source-agreements', '--accept-package-agreements',
+                    # No spinner / progress-bar animation: winget redraws them
+                    # with bare carriage returns and Unicode block glyphs, which
+                    # degrade into line-by-line "Ôûê" mojibake spam when the
+                    # output is piped (| Out-Host below) on a console with an
+                    # OEM codepage - bare German Win11, v3.0.2 field report.
+                    # The flag exists since winget 1.4 (2023); App Installer
+                    # auto-updates far past that.
+                    '--disable-interactivity')
 
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -996,8 +1004,8 @@ Invoke-StageFinish
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCABPz7iiqOw0ojM
-# H74W4LuOsmLck2CVCOMfn4UZPjV8x6CCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCB8eNHSBZbJ9TiL
+# XCZYRhnOsNG3+8BfAWQGCKjFgCroWKCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1071,20 +1079,20 @@ Invoke-StageFinish
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIAqTMrWRSAo/
-# i0rgtX5S33ydcIWllFPi6BoFVVS9nRGeMA0GCSqGSIb3DQEBAQUABIIBgIVrrkjT
-# axzY8qm+eNaQFrAiCmZ1dNI1fOhRzg5DmoJRrQocgDiPfQyvKngVNLDS4vXnqDyK
-# Et9y04nuNnZH37VaXrMpy9lw3vJmZ8AmpC1LPgYJaASo7zU/lDXr67nKrtMkNiGD
-# g4GzqhfwVcdc43XmIK5iiZm2b2mJb5mCYt7vqCIg+mmzWddcrhYltU8skepekrEI
-# F01MTyJPwFGsl7IJawu04KNoZYJ8yDy0cszKeaT/CHPNcFOvv6hc/n0sOYHrWtmm
-# CyocAjvL+Vlc2/wuUdgloXASe0weMvP9vmw0pUroTRfFqWEkyRwFqPaLbaeKZH8S
-# ImIU/8VV8Ro+khC++MOvFrTxVgrLTinaCk57VY+JLGjO80tjA9VVDV49tBP9m/iQ
-# 0PXMVaC13dKRmRXMesqi1+l4jUCXw0lqFK+0MZOcly6jBQoEQorxn1+mfJsxV4VQ
-# W0RXjkh1HHJF2uD6RRLsPBJOTVcZft8awEoJQ+kluBlShRO8Bu6a5OKjE6GCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEICVCl+C//i4t
+# PaXHse+Qrsr4y2f6q0Pb+YGxT5PUFVUmMA0GCSqGSIb3DQEBAQUABIIBgFi/2sK3
+# NqwfeJirmFBxxoa57Gu5ykip6us522RyijpxoOXZQP5n+HEEeCXGp1fujMHans+D
+# RgCcdGT8Kh5sJXf3nEgyFKa6KddhoI/+5zSDAUPuNP4d1NAf5lfB2U4cM3P5KHeg
+# SvFGv9mwRUYTt9xNzl1Gj2KI2KdVmAr13Ye3HpZzbdXeIJm9PqPGahQklyWDZPaJ
+# 4VgTBpsRR66YW9O4QdttGmffwdhWoniVPt/qYhbtx1MSNgp1T+pvqae2fJcHHu6O
+# OuZYhKD40gZMuydHtp8R2frFmcDH+9wivSbhzSAAbGvQ/dKWEvTL4PT8VF9qmBxB
+# /bBo/VjLvfrXoiXA/kul/YGHh/d/Ra14i5R17lrQBGzSdboCxSxw41MqIDA6QIb5
+# UR0SQd2YEyybgva8kun2Cx/+6ltW/oFP8Pbnaa2xX60KzXZ8gt5skqbXfYrhixpG
+# NYQKDcyS8k9smXEokYeXrwKo3vHHAEwrkP5ZL65qx789lVnjwYjxyILrNaGCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQggOs+UMl7M2IQVwbWTVB/r86Dn//p/su+
-# r5rWxf+yusUCBwqofG8CKLUYDzIwMjYwODEyMTU1MTUwWjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgb02csuEGbTBLVNHG9fEaQ3IjgXLEN0m+
+# CeaC3eV4WQsCBwqofG8AgPcYDzIwMjYwODEyMTYwNTE3WjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -1192,22 +1200,22 @@ Invoke-StageFinish
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA4MTIxNTUxNTBaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDBy
-# Ig/ZwrfjynVIoTj3h48wBLWgZ/QuH7PMrMaQSOMnSY3FgkLv/F2CzVpacAp6X84w
+# DQEJBTEPFw0yNjA4MTIxNjA1MTdaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDBx
+# n6JR6nBLHOK9DpfXaPNs2q9FBcX7uN2mBiC2AptskYCMOWXFlN7GWhn21y9hayAw
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAKyil7wpQEuVaSgEi
-# BLdAsDwBISzR1LExLCTRvWTxvUhlQx7qrjxcG+K55fBVYUBsLGTU5zHaY7CeY6ke
-# umDQyhKv6SqMEd/AtDnqm6p4knkUvwLYD2j3VlsjXAW0txvMs/b5eEOxK+MfruX+
-# I0d7I5PbSuAeuRSnsCZlXeLU8GEHFEzeeT/NokrvKuQi5ENwgJXI+NIgFlcIfDfD
-# xA2Lg6Qk6LjncNiZcjGroV/mSuOeo5Fogk7sM4+VsdFcLVudpS597JCsQYsxVKdz
-# Qb/KYf4W9+rDIS6iBBGyzKIwrjhcWWJ50TzlnXoB7hkEQEaV4YH5F9v7TXh1NCcl
-# NcmSFRdtNsUVjJJtbjGmT5aL08LyY/pcLcbK3u4cyiU6B9Ms8s/6oc3R5WuERw3V
-# TxSCw6Fx5WM0yj/57Alu3/Kd3RpeywBsmFLBRYN1L5hLKe4ncxiv8ofi+5o7D+uQ
-# HmTQXLtlXa6+i81sawpj9sgtCjuUqsAndki5oKqbIHmuOrbA3PZV7dHhPBdibnhz
-# ZpasSZMxJLU+x+11+4IZl3cvfFu9oGSwr6bE20TiqPK9KhGLQTFoLwjnk2IW4JmV
-# /lhHDrXID5uVNqhEcvGoyVL/HyBMb0UufQhxalRfFmIzA7AYtIUVSULSNqRelmPF
-# rWsquT+lejMwrJcoZfTqGbkU0ns=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAlASgwAZuCPsIXxSq
+# x5IDxgcJCV8v3FutRslz9CHZehmpeBbn2adIlxbvVEJ0Ax/DeX4C8xKlMlaDYzEI
+# O2Q+ZO7OSkPuRtFbJ4Dcxw1GOyjv18mIb7rcboxPKChQppDTxht4Xl/+1CN9b2Pl
+# EQOtsfKSQegjHnKxlpLwz2DVdpcOPuk8T197NUcYxoXy2hsUZSCOXlTTHnOy3LIm
+# K6wmfox3QTrtJMARQ2t4o//a88kgMVvKv4hl/ayFEmTrXUD5KuDhtM6db16RqMJW
+# pcBUOtN4OI7aBKRdoJCN953qTNIkK3ZBMtJOmoYQMemvqQzG3JpoiOZ1dIWwznc2
+# jb2T787Nb9Am1fLXGURy81HP+YPaJne9hhqTznGJA4qZhd7s6SthivZqal2mdc51
+# ng/RZ6F+pOCJmew8vq2U3qpD+HMwS/iHRKn7EZnWiaIgs7/utMQ9YSXO+ywJn2Vb
+# ebfa21NJfnNQ5RsKk++RiCCVPyFLuiVhCJfmw7Pnz8VIean0aSdyCV9Av8CWpm7h
+# N8JlyvnP2Z9pPISizNLRmnjy/2ODzKri4SyCjJpxSAONuo1bdgo96rrr7bP7bmGC
+# ZwY8B81GjB4sdTbE4JBMSldghjNEqLd8gm65kyleXMBjK5s2h8t0jm0TeTeAmeBU
+# tWekfeAfp00GVpziUYcMWuzzBo0=
 # SIG # End signature block
