@@ -24,12 +24,14 @@
 
       1. Prerequisites  - Git, Node.js LTS, GitHub CLI via winget (Docker
                           Desktop opt-in via -IncludeDocker); Claude Code via
-                          its native installer. Verifies Git Bash and the
-                          Windows WSL bash.exe alias.
+                          its native installer. Verifies Git Bash and reports
+                          which of the two Windows bash.exe shadows (if any)
+                          sits in front of it on PATH.
       2. GitHub sign-in - one browser device-flow login, `gh auth setup-git`,
                           and (when Docker is present) GHCR. Known traps -
                           a shadowing GH_TOKEN, a fine-grained PAT, the WSL
-                          bash alias - get guided fixes with a re-check loop.
+                          bash app execution alias - get guided fixes with a
+                          re-check loop.
       3. Polaris plugin - non-interactive `claude plugin` install from the
                           private dist repo.
       4. Dashboard      - downloads and runs the Setup package from the dist
@@ -108,7 +110,7 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
 
 # Stamped by the release pipeline; 'dev' when run from a working tree.
-$script:BootstrapVersion = '3.0.3'
+$script:BootstrapVersion = '3.0.4'
 
 # --- Constants ----------------------------------------------------------------
 
@@ -328,26 +330,43 @@ function Find-GitBash {
     return $null
 }
 
-# $true when `bash` on PATH resolves to the Windows WSL app-execution alias
-# (which shadows Git Bash and fails when no WSL distro is installed).
-function Test-WslBashAlias {
+# Classifies what a bare `bash` on PATH resolves to. Windows ships two very
+# different bash.exe shadows and only one of them is fixable from Settings:
+#   AppAlias    - %LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe, the WSL app
+#                 execution alias. The Settings toggle deletes this stub.
+#   WslLauncher - %SystemRoot%\System32\bash.exe, the "Microsoft Bash Launcher"
+#                 hardlinked out of WinSxS by the Windows Subsystem for Linux
+#                 optional feature. The Settings toggle does NOT touch it, and
+#                 the feature itself cannot simply be turned off on machines
+#                 whose Docker Desktop runs on the WSL2 backend.
+function Get-PathBashKind {
     $onPath = Get-Command bash -ErrorAction SilentlyContinue
-    if (-not $onPath) { return $false }
-    return ($onPath.Source -like "$env:SystemRoot\System32\bash.exe" -or $onPath.Source -like '*\WindowsApps\*')
+    if (-not $onPath) { return 'None' }
+    if ($onPath.Source -like '*\WindowsApps\*') { return 'AppAlias' }
+    if ($onPath.Source -like "$env:SystemRoot\System32\bash.exe") { return 'WslLauncher' }
+    return 'Other'
 }
 
-# Guided fix for the WSL alias trap: opens the Settings page and re-checks
-# until fixed or the user chooses to continue anyway.
-function Repair-WslBashAlias {
-    while (Test-WslBashAlias) {
+# Handles a shadowed `bash`. Only the app execution alias gets the guided
+# Settings fix with a re-check loop - pointing a WslLauncher machine at that
+# toggle produces a loop that can never clear, because the toggle does not own
+# that file. WslLauncher is informational instead: both Polaris consumers reach
+# Git Bash by absolute path anyway (Claude Code prepends Git's bin directories
+# to PATH inside its own sessions, and the Dashboard's ShellPathResolver probes
+# %ProgramFiles%\Git\bin\bash.exe before it ever consults PATH), so the shadow
+# only matters when Git Bash is genuinely absent.
+function Repair-BashShadowing {
+    param([string]$GitBashPath = (Find-GitBash))
+
+    while ((Get-PathBashKind) -eq 'AppAlias') {
         $source = (Get-Command bash -ErrorAction SilentlyContinue).Source
-        Write-Warn2 "bash on PATH resolves to $source - that is the Windows WSL alias, not Git Bash."
-        Write-Warn2 'The Polaris plugin runs its hooks through Git Bash; the WSL alias shadows it and fails without a WSL distro.'
+        Write-Warn2 "bash on PATH resolves to $source - that is the WSL app execution alias, not Git Bash."
+        Write-Warn2 'The Polaris plugin runs its hooks through Git Bash; the alias shadows it and fails without a WSL distro.'
         Write-Host  '    Fix: Settings > Apps > Advanced app settings > App execution aliases > turn OFF bash.exe.'
         if ($DryRun) { Write-Plan 'Would open the App execution aliases Settings page and re-check.'; return $false }
         $choice = Read-Choice -Prompt 'Open that Settings page now, then press Enter here after toggling? (o=open, r=re-check, s=skip)' -Options 'o','r','s' -Default 's'
         if ($choice -eq 's') {
-            Write-Warn2 'Continuing with the WSL alias in place - plugin hooks may fail until it is turned off.'
+            Write-Warn2 'Continuing with the alias in place - plugin hooks may fail until it is turned off.'
             return $false
         }
         if ($choice -eq 'o') {
@@ -356,8 +375,31 @@ function Repair-WslBashAlias {
         }
         # 'r' (and the post-'o' path) fall through to the loop re-check.
     }
-    if (Get-Command bash -ErrorAction SilentlyContinue) { Write-Ok 'bash on PATH is not the WSL alias' }
-    return $true
+
+    switch (Get-PathBashKind) {
+        'WslLauncher' {
+            if (-not $GitBashPath) {
+                Write-Warn2 "bash on PATH is $env:SystemRoot\System32\bash.exe - the WSL launcher, which fails without a WSL distro - and Git Bash was not found."
+                Write-Warn2 'Install Git for Windows (https://git-scm.com/download/win) and re-run; the plugin hooks need a real bash.'
+                return $false
+            }
+            Write-Ok "bash on PATH is the WSL launcher, but Polaris uses $GitBashPath directly - nothing to fix."
+            Write-Skip 'That System32\bash.exe belongs to the Windows Subsystem for Linux feature; the App execution aliases toggle does not remove it.'
+            return $true
+        }
+        'None' {
+            if (-not $GitBashPath) {
+                Write-Warn2 'No bash on PATH and no Git Bash found - install Git for Windows and re-run.'
+                return $false
+            }
+            Write-Ok "No bash on PATH, but Polaris uses $GitBashPath directly - nothing to fix."
+            return $true
+        }
+        default {
+            Write-Ok 'bash on PATH is not a WSL shadow'
+            return $true
+        }
+    }
 }
 
 function Invoke-StagePrerequisites {
@@ -410,7 +452,7 @@ function Invoke-StagePrerequisites {
         foreach ($entry in $nativeWork) {
             Write-Plan 'irm https://claude.ai/install.ps1 | iex   (Claude Code native installer, per-user)'
         }
-        [void](Repair-WslBashAlias)
+        [void](Repair-BashShadowing)
         Set-StageResult 'Prerequisites' 'dry-run'
         return
     }
@@ -491,7 +533,7 @@ function Invoke-StagePrerequisites {
     } else {
         Write-Warn2 'Git Bash not found - the plugin runs its hooks through bash. Install Git for Windows and re-run.'
     }
-    [void](Repair-WslBashAlias)
+    [void](Repair-BashShadowing -GitBashPath $gitBash)
 
     foreach ($tool in $blocking) {
         Write-Warn2 "$($tool.Name) is still not usable - close this window, open a NEW one and re-run this script (installers only extend PATH for new processes)."
@@ -1034,8 +1076,8 @@ Invoke-StageFinish
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBF3ud9yFDBgTlE
-# PltPm/wjekfzxdc9ddfJ5DwoIxJssqCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBkZH6lzx9pl2qb
+# jHRx/wnD9jCsgL8ECzyFpvMTM0Z9j6CCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1109,20 +1151,20 @@ Invoke-StageFinish
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIAHFjBBx1f+P
-# 15QQg3Nucv53uTLH2D+OIlCPHFZ4gdMRMA0GCSqGSIb3DQEBAQUABIIBgDmqxd7+
-# AsxAzyq1hNsw4mHLN25iVWmShuSOLjZS9nKiyxoWd6Z4J/OS99GzTWTOMSH/dGJC
-# dWgu1AoVok6TIJw0Ohj+qtLXl98wX9NRiBMyqLRCr8HiV81/LQeSgo9zt4DhIZVf
-# /eXpZF85lrdYdtKxBorSWBImy02MomRlWOLg6xgYUiyrGQbN9o9clHc+MkQ0OZvR
-# InpRyMBEJdEPDKVBK3sLO4qP27LmuEof9Yaz0z75JhzUWlixw77e9VcIXzyh7efu
-# SkNwl+JO6e1YoSn8wtgb4SrngAPnyXWvC2/YEBiviziKvTjk0dlHBABMyoSUSats
-# 8QIF/YqanInfBmO4ycYXtniJYsAQPLfBHDTlwXMpa8wstu6LOkOL13ICKrpP8Jt2
-# 6epF4gknr/d53KuDJzFCXV5ra/HEyCSfx0/H9J2FNkCVN8e9pjRlooETZvJFaNPy
-# rMx+nWuTLKIV/MYzbfFwNcyqya8+sUPjm/rTVb3IDczyQEj6/Qw6rnas26GCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIPi5GLpwJ9Gw
+# LIwekrU000cW8jlGWAu6RGM5dQinXWlXMA0GCSqGSIb3DQEBAQUABIIBgFL74Fmn
+# xjEQTI4GxBT04CvGZAdcQXTVMKCqUxPSQs8TBd+d/FEiksjRj2V29gwX8O8dYEOF
+# C9ON8JMzGasKu9XWdgBAaeWjVjVzXFCU12jELzFRmeq2kKvM0nmT/iSHTVMVVGx0
+# XZRKhfInMUibwGjtVsDV/mPKPBJ2x4b2Q5gJM/dnMjPyJBDUt4eRohxLyty+tiPh
+# zPxLAJEvyaFXpr6vjNHZbgCXH269Y0cDYQyHvhEw+kWIDK2Fu29EJwNx3wMUrPH5
+# IjCmRo5F4Ln4A7afypoEz5hcrHTnUZUemHgyDa7BxArUFH2d7VNa8lc0XdUnl/mo
+# MsE3FS2D7/IvmpJcBn8aI+e+1HSBIl+Fxq7j202iiav0YiISXUOSGUhSp25Rc+p4
+# s7Ay4YVR3uzDbNXK2wqAfc+20WgG8FNCU1mh/AQOEdcVlNIdetdYlfu07Yf0WEPQ
+# 8nHE028JD68wUFllLGO2rlBOq9Hm0Iz8xKparnnEIgy8cIZB9lud248hpaGCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQgfApGj7qMKpsXCsJD2CPYjATsY7GepyGv
-# cACntSGU9pECBwqofG8g77IYDzIwMjYwODEyMjEyMjIyWjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgMPDfXclNrLKVqM+J/yMr5TbnqsQzrBlC
+# 6xLHOomEy2ECBwqofG8l63AYDzIwMjYwODEzMDcyNjIxWjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -1230,22 +1272,22 @@ Invoke-StageFinish
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA4MTIyMTIyMjJaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDDv
-# oKDrYJyaqGUxzcIn96ivl/TSb+Osa+oYBEmsiVDBZH/MfVV+XP5NiHfHwswmlBYw
+# DQEJBTEPFw0yNjA4MTMwNzI2MjFaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDDp
+# yNdsHf8igQyYnH4WzNy/gnJ7JQc4Rb1jbTZVkUuBnyP1fvjFOwhQrgC7FHO0sKow
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAfsH+2gI3lKbH0/tC
-# hhYv2EY1yiBC2vR8O3Md8aX2A2fWs4mkYa/5l0o0d0a2TKorb+zDCzzwmngRHxYR
-# uwoyeVcF1kj3zKb2LzlrzdRLFjy1oamVeGU4Gp4IFNs5h0ibh6HyODobBW78D2cn
-# dtrHNZxeyfgtOeXllM4WEiG8rZA0dJUfFbMekUSQULsww6qT39fc6n849x3Gy7Kk
-# sH35XwjLXs8BSvLRA8vT702jh0XxJkqqeZLxuHrl7ACjKtRgGl5Pts7PIU4fFp6R
-# GFNur6DdPDnqzVZAOs2EEEmnv3yivUH0nXVD78XZqdmSzoNdzoRUPtANFzOM9rQN
-# NcKQ3JqLqKqTvHSC/zmiK/HUxQmrjIqQRH4JrAyCGzhE9eJYzfGoXQeigiMjqPaj
-# D8Ve+fXR3nH5Y/244G2P5MQsFlC7zVMgtst9WatrHiWfBzbWnCKEhZkR+xxG8PCO
-# RLGyXhIpYarZth9R83tJ+0DvU9dbs8JFlimEk/BJQHNGnXLPE3TSVSQ2RX8GbcXN
-# C42IgrspIes6x13wf7/LZTzXzxsH1x3G5daZInlKZ4LuP7+3yv9nFireCD5PrlUp
-# NUjIKn2zHKfuBf8EwhAjK9/sdAw5BSr2Xmj8qVII4WtISE1IHLQD5Au8WK6yAHA2
-# jsiykA4un62FBoNcBGEAm8z6aeg=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAnbOEeMa0iC8fzwqq
+# ywTjoyzIQKz315fEgdTfboOM0siabdVbRwWW0JMvGn3hMtCsCy4X1Q8guKZAfGCM
+# RXqTcOmK7NGT/V/OrFvM+I1PhZteNVKoDZaAMM/KFEGG2t2sEJs7qFTH6Tr7qbQY
+# Kl5DvVgHG3iy5iRUxTK03+ym9O2cEGKFw1ncQExu3/ZF+92LK7z9/1m/x7gnFsEX
+# FNpQoEajfrZ9zEn23VvxI6qIhCATliLouC730gs6b1L6uY84SDOMaR33fMTogpQQ
+# 42XIzmZYC+m76qm+t8WbcSQLhZH/+pwlFF//J29EfvUfkaTpPHaBChiL4BxFzH+3
+# N6IQAF21/0l18tqBV3gDKoXhXajiMpaDtKn4x25BVOBXEfUrMnC8MfDVZ1wyAl5W
+# CinFHZcGfuCYAh/mjKmB4J442CC76836nNCO9hOnGsWlT7XQ7I32sqteynHygQi/
+# BN3HyRpNI7Ypytla9udksxMyA6Tm3LFukTpaimlLwz8nVAcgkchbqSe+030xa5si
+# TLoiq2ZZYFZ0ccE5M4T5aC0Q9r9jLnZdiyE9m6HSgg2ZQCfbMpuC6jBzGDvTDPCs
+# RCPbqfE5J/Xl8iHMEqXcgBaQWE0LP9Z5ml0azCE1wDsC5G2VYBdWM1kUGYlQuhAX
+# BGBE9t18kcK7/dI/eB/lmxNtNdY=
 # SIG # End signature block
