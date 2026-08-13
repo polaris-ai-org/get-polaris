@@ -110,7 +110,7 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
 
 # Stamped by the release pipeline; 'dev' when run from a working tree.
-$script:BootstrapVersion = '3.1.0'
+$script:BootstrapVersion = '3.1.1'
 
 # --- Constants ----------------------------------------------------------------
 
@@ -204,6 +204,80 @@ function Update-SessionPath {
     }
 }
 
+# Anthropic's native Claude Code installer drops claude.exe into ~\.local\bin
+# but does NOT persist that directory to the user PATH - its own closing hint
+# says to add it via System Properties. Update-SessionPath covers only THIS
+# window, so every NEW terminal lost `claude` again: on the v3.1.0 bare-machine
+# run the Setup Doctor's terminal handoff broke on a fresh terminal, and each
+# re-run of this script re-ran the whole native installer. Persist the entry
+# ourselves - carefully, the user Path value is a known Windows footgun:
+#   * read it RAW (DoNotExpandEnvironmentNames) so existing %VAR% entries
+#     survive the round-trip,
+#   * write it back preserving the registry value kind - never
+#     [Environment]::SetEnvironmentVariable('Path', ..., 'User'), which
+#     rewrites REG_EXPAND_SZ as REG_SZ and kills %VAR% expansion, and never
+#     setx, which truncates at 1024 characters,
+#   * broadcast WM_SETTINGCHANGE so windows opened after this see the change.
+function Add-UserPathEntry {
+    param([Parameter(Mandatory)][string]$Directory)
+
+    $envKey = Get-Item 'HKCU:\Environment'
+    $rawPath = [string]$envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+
+    # Idempotence: compare case-insensitively, tolerate a trailing backslash,
+    # and accept the literal form as well as a %USERPROFILE% spelling.
+    $wanted = $Directory.TrimEnd('\')
+    $wantedAsVar = $null
+    $profileRoot = "$env:USERPROFILE".TrimEnd('\')
+    if ($profileRoot -and $wanted.StartsWith($profileRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $wantedAsVar = '%USERPROFILE%' + $wanted.Substring($profileRoot.Length)
+    }
+    foreach ($rawEntry in ($rawPath -split ';')) {
+        $entry = $rawEntry.Trim().TrimEnd('\')
+        if (-not $entry) { continue }
+        if ($entry -eq $wanted -or ($wantedAsVar -and $entry -eq $wantedAsVar) -or
+            ([Environment]::ExpandEnvironmentVariables($entry).TrimEnd('\') -eq $wanted)) {
+            Write-Skip "$Directory is already in the user PATH"
+            return
+        }
+    }
+
+    if ($DryRun) {
+        Write-Plan "Would append $Directory to the user Path in the registry (persists for new windows)."
+        return
+    }
+
+    $newPath = $wanted
+    if (-not [string]::IsNullOrWhiteSpace($rawPath)) { $newPath = $rawPath.TrimEnd(';') + ';' + $wanted }
+
+    # Preserve REG_EXPAND_SZ; a value carrying %VAR% entries must stay (or
+    # become) expandable or those entries turn into dead literals.
+    $kind = [Microsoft.Win32.RegistryValueKind]::String
+    if (($envKey.GetValueNames() -contains 'Path' -and $envKey.GetValueKind('Path') -eq [Microsoft.Win32.RegistryValueKind]::ExpandString) -or
+        $newPath -like '*%*') {
+        $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+    }
+    Set-ItemProperty -Path 'HKCU:\Environment' -Name 'Path' -Value $newPath -Type $kind
+    Write-Ok "$Directory added to the user PATH (new terminals will see it)"
+
+    # Nudge running apps (Explorer above all) to reload the environment so
+    # terminals spawned from the taskbar/Start menu pick the new PATH up
+    # without a sign-out. Best effort: a hung window must not fail the install.
+    try {
+        if (-not ('PolarisBootstrap.NativeMethods' -as [type])) {
+            Add-Type -Namespace PolarisBootstrap -Name NativeMethods -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+        }
+        $result = [UIntPtr]::Zero
+        # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, 5 s timeout.
+        [void][PolarisBootstrap.NativeMethods]::SendMessageTimeout([IntPtr]0xFFFF, 0x001A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$result)
+    } catch {
+        Write-Warn2 "Environment-change broadcast failed ($($_.Exception.Message)) - already-open apps keep the old PATH; new sign-ins see the new one."
+    }
+}
+
 function Out-WingetLine {
     # winget animates a spinner (- \ | /) and a block-glyph progress bar via
     # bare carriage-return redraws. Piped (as below), every redraw frame lands
@@ -259,6 +333,8 @@ $Prerequisites = @(
         Name = 'Claude Code'; Command = 'claude'; VersionArg = '--version'
         Installer = 'native'; Purpose = 'everything'
         Hint = 'irm https://claude.ai/install.ps1 | iex'
+        # Where the native installer puts the exe - probed when PATH lacks it.
+        KnownPath = (Join-Path $env:USERPROFILE '.local\bin\claude.exe')
     },
     @{
         Name = 'Node.js 18+'; Command = 'node'; VersionArg = '--version'
@@ -283,14 +359,28 @@ $Prerequisites = @(
 function Get-ToolStatus {
     param([Parameter(Mandatory)][hashtable]$Tool)
 
-    if (-not (Get-Command $Tool.Command -ErrorAction SilentlyContinue)) {
-        return [pscustomobject]@{ Status = 'Missing'; Version = '' }
+    $exe = $Tool.Command
+    $status = 'Ok'
+    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
+        # Off PATH is not the same as not installed: Claude Code's native
+        # installer leaves ~\.local\bin unpersisted (see Add-UserPathEntry),
+        # so every fresh window used to land here, report "not found" and
+        # re-run the whole installer (v3.1.0 bare-machine field report).
+        # Probe the known install location by absolute path instead; the
+        # caller repairs PATH rather than reinstalling. Indexer access - see
+        # the MinMajor note below.
+        $known = $Tool['KnownPath']
+        if (-not ($known -and (Test-Path -LiteralPath $known))) {
+            return [pscustomobject]@{ Status = 'Missing'; Version = '' }
+        }
+        $exe = $known
+        $status = 'NotOnPath'
     }
 
-    $probe = Invoke-Native -Exe $Tool.Command -Arguments @($Tool.VersionArg)
+    $probe = Invoke-Native -Exe $exe -Arguments @($Tool.VersionArg)
     $version = ''
     if ($probe.Output -match '\d+(\.\d+)+') { $version = $Matches[0] }
-    # On PATH but not answering - treat as absent so it gets (re)installed.
+    # Present but not answering - treat as absent so it gets (re)installed.
     if ($probe.ExitCode -ne 0 -and -not $version) {
         return [pscustomobject]@{ Status = 'Missing'; Version = '' }
     }
@@ -304,7 +394,7 @@ function Get-ToolStatus {
             return [pscustomobject]@{ Status = 'Outdated'; Version = $version }
         }
     }
-    return [pscustomobject]@{ Status = 'Ok'; Version = $version }
+    return [pscustomobject]@{ Status = $status; Version = $version }
 }
 
 # The plugin's hooks are bash scripts, so Git for Windows' bash is a hard
@@ -410,17 +500,25 @@ function Invoke-StagePrerequisites {
         $state = Get-ToolStatus -Tool $tool
         $probed += [pscustomobject]@{ Definition = $tool; Status = $state.Status; Version = $state.Version }
         switch ($state.Status) {
-            'Ok'       { Write-Ok    "$($tool.Name) - $($state.Version)" }
-            'Outdated' { Write-Warn2 "$($tool.Name) - found $($state.Version), need $($tool.MinMajor) or newer" }
-            'Missing'  { Write-Warn2 "$($tool.Name) - not found" }
+            'Ok'        { Write-Ok    "$($tool.Name) - $($state.Version)" }
+            'Outdated'  { Write-Warn2 "$($tool.Name) - found $($state.Version), need $($tool.MinMajor) or newer" }
+            'NotOnPath' { Write-Warn2 "$($tool.Name) - installed ($($state.Version)) but not on PATH" }
+            'Missing'   { Write-Warn2 "$($tool.Name) - not found" }
         }
     }
 
     $wingetWork = @()
     $nativeWork = @()
+    $pathRepairWork = @()
     foreach ($entry in $probed) {
         if ($entry.Status -eq 'Ok') { continue }
         $def = $entry.Definition
+        if ($entry.Status -eq 'NotOnPath') {
+            # On disk, only PATH is broken - reinstalling would change nothing
+            # (the installer leaves PATH unpersisted); repair the PATH instead.
+            $pathRepairWork += $entry
+            continue
+        }
         if ($def.Optional -and -not $IncludeDocker) {
             Write-Skip "$($def.Name) - optional, pass -IncludeDocker to install it"
             continue
@@ -441,7 +539,7 @@ function Invoke-StagePrerequisites {
     }
 
     if ($DryRun) {
-        if ($wingetWork.Count -eq 0 -and $nativeWork.Count -eq 0) {
+        if ($wingetWork.Count -eq 0 -and $nativeWork.Count -eq 0 -and $pathRepairWork.Count -eq 0) {
             Write-Plan 'Nothing to install - every required prerequisite is already satisfied.'
         }
         foreach ($entry in $wingetWork) {
@@ -451,6 +549,11 @@ function Invoke-StagePrerequisites {
         }
         foreach ($entry in $nativeWork) {
             Write-Plan 'irm https://claude.ai/install.ps1 | iex   (Claude Code native installer, per-user)'
+            Write-Plan "Would then persist $(Join-Path $env:USERPROFILE '.local\bin') to the user PATH (the native installer does not)."
+        }
+        foreach ($entry in $pathRepairWork) {
+            Write-Plan "$($entry.Definition.Name) is installed but not on PATH - would repair PATH instead of reinstalling:"
+            Add-UserPathEntry -Directory (Split-Path $entry.Definition['KnownPath'] -Parent)
         }
         [void](Repair-BashShadowing)
         Set-StageResult 'Prerequisites' 'dry-run'
@@ -458,7 +561,7 @@ function Invoke-StagePrerequisites {
     }
 
     $restartPending = $false
-    if ($wingetWork.Count -eq 0 -and $nativeWork.Count -eq 0) {
+    if ($wingetWork.Count -eq 0 -and $nativeWork.Count -eq 0 -and $pathRepairWork.Count -eq 0) {
         Write-Ok 'Nothing to install'
     } else {
         if ($wingetWork.Count -gt 0) {
@@ -505,8 +608,28 @@ function Invoke-StagePrerequisites {
                 $ErrorActionPreference = $prev
             }
             Update-SessionPath
+            # The native installer extends PATH only for itself - it does NOT
+            # persist ~\.local\bin to the user Path (its closing output says
+            # to add it via System Properties). Without this, `claude` was
+            # gone again in every new terminal, which broke the Setup
+            # Doctor's terminal handoff (v3.1.0 bare-machine field report).
+            $claudeBinDir = Join-Path $env:USERPROFILE '.local\bin'
+            if (Test-Path -LiteralPath (Join-Path $claudeBinDir 'claude.exe')) {
+                Add-UserPathEntry -Directory $claudeBinDir
+            }
             if (Get-Command claude -ErrorAction SilentlyContinue) { Write-Ok 'Claude Code installed' }
         }
+    }
+
+    # Installed but missing from PATH: reinstalling is pure noise - the v3.1.0
+    # bare-machine run re-ran the whole native installer on every re-run while
+    # each new terminal still could not resolve `claude`. Fix this window now
+    # (the verify below then shows Ok with the real version), persist the
+    # entry for the windows that follow.
+    foreach ($entry in $pathRepairWork) {
+        Write-Step "$($entry.Definition.Name) is installed but not on PATH - repairing PATH instead of reinstalling"
+        Update-SessionPath
+        Add-UserPathEntry -Directory (Split-Path $entry.Definition['KnownPath'] -Parent)
     }
 
     # Verify.
@@ -1076,8 +1199,8 @@ Invoke-StageFinish
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAQrf0amXtgUeNJ
-# dSAmTI9xIyEs3dBgRWDrQ5IPE1SbyKCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA0qL3S8awAeTLE
+# KiSwY2dXoT+BNg7uHG6lW17HLA2Yu6CCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1151,20 +1274,20 @@ Invoke-StageFinish
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIK6XgRIr0sjF
-# 9nPId62BchXJSqrPCjMrcZWCrvmwMrDEMA0GCSqGSIb3DQEBAQUABIIBgI3/pXFr
-# ciOe+laJqcZJ2jhfjgAOCEcZ9tfNwIv/5Gz51CmTe+HzI+jQpajS2nfRpVY8b7yC
-# sUG9yhfngyXloa6A7wNmHsVxrbppf9v1pmNMvZ7VLgSmvSHL+ozQnjPqUASgzC2l
-# azjBHzgY3hvrXLaWKrTn3SCK4CjuJgWW6P5n637Wp40FqUdqCTujiV2oMw0LCMO2
-# /EVjQOoG9Oiw4TnyD6EbfUHOkDnhIiN/rp4SYmDQXuk3WivjqEkEiNl/K7TU7P3z
-# xj/SdemyoSkohJ11tTZyS1lV2uDq1wsT+GaaMnFMH3W98ro4uLWx+LDjnB2B/STQ
-# g6OThfEH/sDRsyam+y14PM4YfzL5ttPwq564amrRegWcEF11CO9T3sStSBTg4S0u
-# jmjsjx9CkxqdoyH3iES5ES+4XmpVMg7SCf9MhTl7Dlo9fdbYiAdhtBshdFklI0I2
-# d2utmbd0qK1m+ezXLZxlQU1t0Yuk8sYW4k6cDLI1DG7TqDBndwGPU8m3JqGCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIJDsS20GkCNP
+# 4W9/UXhpwrTXcUPbWafjoXE+qh2Xvrr3MA0GCSqGSIb3DQEBAQUABIIBgGjnp7+/
+# wMYBo29tNwO459pMvSScsmGrQViZWDFucBYgRSjJipgDljeUMtBZPGJA0TV/Z4HG
+# DG9cNWEVcojjzJW7f/0pFj6zkoSYVk1mvDQVZkbq3nKkDfsL8C510K16QBrmcOpR
+# Cn+0DS72KvqvFT2irjIvUr88F8ocxJY2mSSqZP3RO2jB4mM+OeYTS4kqxdm9xPa+
+# 6Bb9lfS8mPuckSMRZOW5LQkqMrH3vZ0TqmUya0Qwq6n8HIQxyECI/Gr5hK+chbsX
+# IYR4MCyhSMQb2/I05mh03z4x9ycb8KwOAVgmnVKhVIuBVPAiLMGCzCqJv+LygY3c
+# CouCwfMgOo0h94fQ/+5oa0kxBk1fOxCtX5T+DZ9iTqrQ8gGZppFo4Patav7PlMpL
+# b8wtmx6hLCWAGtqFjJvPeZrTZ02tqz5p5Jpbr3SKuR68nQUcsPRsRVkR/gN3Ueqp
+# JQ3Nl5PmG37Zl5YoD6/5PhZVduQr9kEHFXA2q2r65JCLVp6ebGaLbTlgdKGCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQgVX2OBTikykIv/aVlhcllMLQxG+YWUN9W
-# sp6hPINNNYQCBwqofG8y5BoYDzIwMjYwODEzMTc0OTA0WjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgr8ragfjncEKzC/FHf9cjokfz+dxzAFIy
+# F4DCMhzaNTECBwqofG83K84YDzIwMjYwODEzMjE0NDM4WjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -1272,22 +1395,22 @@ Invoke-StageFinish
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA4MTMxNzQ5MDRaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDC4
-# v/u/TqggMX8KhcfbcjR2Ece4+LubBhqKPRZn1Kyw3Vwdqn2112ydj2WFClfrqMkw
+# DQEJBTEPFw0yNjA4MTMyMTQ0MzhaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDDt
+# N3Uu1js/MXkDWgw4OKWwm9RoRrT9v6WmWaQZk9mZ/sSkAw+YGY9oZVvc763Nn3Uw
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAgHjwJg53KPlxBKNk
-# 76vhz7hfbxo7LbDYoiczDhkVR6tKaGUsPDONUDpvZup0aFKd7kBVysYNDdzKkD4R
-# nIH0zkG/G1ecFgNPXguORACzzsqgf/Sj/X/YgFxBnTx/ID8Pe8+PGdejEktv61Hn
-# xuDFEQpkG/ZTTK4A/FknYuTW+yDVuv+TmutOGqmGllZjXLLdhOmM7AlFf0mMCJSm
-# kHgoBmVEN/La6BFoo+uZsSUSqipzwY4vxJHGS5qX08rI4iPn31asZ6xVhV0o2fTQ
-# KHAP+/KRWCk//fn5Ycb5yxAaBEnTXYsaKHcWKa8om8OQRcv9MK4G+sokl1S0NASp
-# o+St4rrpgNA/4QfGyUSL2Yq/K6EWwhG5wsLzBtWv7X+Z6GyZcpDJqXvufN/AL1yB
-# ZVwhtndn1HlRgFs8xWUmrIMevfogKveJLF0cWZRk675rAbkxqM92oYGWbRfomZiV
-# kmYzCTbYA+38o77A41udamvE95SfOnwRmM4XPD/JyjSXPgGzdSpgmXn9HxdKhZ8U
-# 2XHpcHBi7vTK/c2vuDw6PIR1eh+huiSsqcEaHf8ezKo6yqdgxtVr06YCExD88Pap
-# AM1np1Folcj2DQ4HHFqkzr9WnjAZg7elTXwWcraB2TxYngDW7qzs/Gn5hr+u2U2E
-# SntvNs+t/Vv9T3tm37aEbu1y8M8=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIArJKNMnorGBB/ZXXf
+# GoOtbDktH0hoosJCYzAlvAp2TdIJ8B5HcvSRq2Lv5ifiUiMpTU6JlvIrruklbVww
+# KLLy/JxphmjK+7SmuidVc9pROduftaT9sGPjoEEGMllCSsZQInoOlqp1kcGXgLmZ
+# j/w5zMUtNPzIp+AJO8GH/SVQZKZrppEi3bU7ptwizy+9ril06shRER7VNgmOkPhb
+# 7OXOvAgPehBdoDRNWKuRGi6p9FU3YUh0zcVMzCyuQek+1YSi23yL9Za6Pr3NI/4i
+# PdbDMaBhP/zYs4Tlq+p9scOB98vg57tIfnAOxgqByCr+PLiskuVEMzXk360hfn5j
+# w6Bzdm81m7cgpB81VUX0vUa9eA4HIhC2XJmTWEPvZXvXMEZMJyFog6naOna2BFvN
+# Ho6jpTrDy+CwW6GDKOMm7OuF60af/YUlLwtmrjdR8ZZVLoo4UnP9Yh6tXx7+ksxw
+# A8MjE25ftgWPy6iD9bO9TnJn9kL33n1Jo9oXe/4dsLDBeGwsKR2je6POepOvByTw
+# nwg9YWRPOfw+NAN7FrWl7eBTMz6wYh98KRizr1KnfxZMwOVC23ykSQ5Fxzg2YrZk
+# T2FVU2AGDE6snYQQQol0KLjZg2u6VsF/qna+4+Qa+e8QoOPH7o7vKYzbr0Wi3RSp
+# UuTlfXVncpt3ih1oBg6Bv0xhcKI=
 # SIG # End signature block
