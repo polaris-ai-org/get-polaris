@@ -24,9 +24,12 @@
 
       1. Prerequisites  - Git, Node.js LTS, GitHub CLI via winget (Docker
                           Desktop opt-in via -IncludeDocker); Claude Code via
-                          its native installer. Verifies Git Bash and reports
-                          which of the two Windows bash.exe shadows (if any)
-                          sits in front of it on PATH.
+                          its native installer - an existing npm install is
+                          detected and offered the switch, never removed.
+                          Reports a blocking execution policy with its fix,
+                          verifies Git Bash, and reports which of the two
+                          Windows bash.exe shadows (if any) sits in front of
+                          it on PATH.
       2. GitHub sign-in - one browser device-flow login, `gh auth setup-git`,
                           and (when Docker is present) GHCR. Known traps -
                           a shadowing GH_TOKEN, a fine-grained PAT, the WSL
@@ -110,7 +113,7 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
 
 # Stamped by the release pipeline; 'dev' when run from a working tree.
-$script:BootstrapVersion = '3.1.1'
+$script:BootstrapVersion = '3.2.0'
 
 # --- Constants ----------------------------------------------------------------
 
@@ -149,16 +152,80 @@ function Set-StageResult([string]$Stage, [string]$Result) {
 
 # --- Process helpers ----------------------------------------------------------
 
+# Extensions Windows can START as a process, best first. .ps1 is deliberately
+# absent - it is not an executable, it is a script that has to be LOADED.
+$script:NativeExeExtensions = @('.exe', '.com', '.cmd', '.bat')
+
+# Same directory, same stem, a startable extension. npm writes claude,
+# claude.cmd and claude.ps1 side by side, so the sibling of a .ps1 shim is the
+# .cmd that actually runs. Returns $null when there is none.
+function Get-ExecutableSibling {
+    param([Parameter(Mandatory)][string]$Path)
+    $dir = [System.IO.Path]::GetDirectoryName($Path)
+    if ([string]::IsNullOrEmpty($dir)) { return $null }
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+    foreach ($ext in $script:NativeExeExtensions) {
+        $candidate = Join-Path $dir ($stem + $ext)
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    return $null
+}
+
+# PowerShell's command discovery ranks an ExternalScript (claude.ps1) ABOVE an
+# Application (claude.cmd), so a bare `& claude` on a machine carrying the npm
+# shims asks PowerShell to LOAD A SCRIPT FILE - which the default Restricted
+# execution policy of Windows PowerShell 5.1 refuses ("Die Datei ...
+# \npm\claude.ps1 kann nicht geladen werden" - German-locale field report
+# 2026-08-14, which killed stage 1 outright). Resolve to a real executable
+# instead, never to a .ps1, so no execution policy can break a native call
+# again. Falls back to the name unchanged when nothing resolves - the caller
+# then fails exactly as it did before.
+function Resolve-NativeCommandPath {
+    param([Parameter(Mandatory)][string]$Name)
+
+    # Already an explicit path: only a .ps1 needs swapping.
+    if ($Name -match '[\\/]') {
+        if ([System.IO.Path]::GetExtension($Name) -ne '.ps1') { return $Name }
+        $sibling = Get-ExecutableSibling -Path $Name
+        if ($sibling) { return $sibling }
+        return $Name
+    }
+
+    $candidates = @(Get-Command -Name $Name -All -ErrorAction SilentlyContinue)
+    if ($candidates.Count -eq 0) { return $Name }
+
+    # Applications only, best extension first - PATH order does not decide
+    # here, so a native claude.exe beats an npm claude.cmd wherever it sits.
+    foreach ($ext in $script:NativeExeExtensions) {
+        foreach ($candidate in $candidates) {
+            if ($candidate.CommandType -ne 'Application') { continue }
+            if (-not $candidate.Source) { continue }
+            if ([System.IO.Path]::GetExtension($candidate.Source) -eq $ext) { return $candidate.Source }
+        }
+    }
+
+    # No Application at all - a .ps1 shim may still have a startable sibling.
+    foreach ($candidate in $candidates) {
+        if ($candidate.CommandType -ne 'ExternalScript') { continue }
+        if (-not $candidate.Source) { continue }
+        $sibling = Get-ExecutableSibling -Path $candidate.Source
+        if ($sibling) { return $sibling }
+    }
+
+    return $Name
+}
+
 # Run a native command capturing combined output + exit code without tripping
 # $ErrorActionPreference='Stop' (Windows PowerShell 5.1 turns a native command's
 # redirected stderr into a terminating NativeCommandError; relaxing the
 # preference around the call avoids that).
 function Invoke-Native {
     param([Parameter(Mandatory)][string]$Exe, [string[]]$Arguments = @())
+    $resolved = Resolve-NativeCommandPath -Name $Exe
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = & $Exe @Arguments 2>&1 | Out-String
+        $output = & $resolved @Arguments 2>&1 | Out-String
         return [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
     } finally {
         $ErrorActionPreference = $prev
@@ -335,6 +402,9 @@ $Prerequisites = @(
         Hint = 'irm https://claude.ai/install.ps1 | iex'
         # Where the native installer puts the exe - probed when PATH lacks it.
         KnownPath = (Join-Path $env:USERPROFILE '.local\bin\claude.exe')
+        # The competing install shape (see Test-ShimCommand) - named so the
+        # shim guidance can print the exact uninstall command.
+        NpmPackage = '@anthropic-ai/claude-code'
     },
     @{
         Name = 'Node.js 18+'; Command = 'node'; VersionArg = '--version'
@@ -356,12 +426,93 @@ $Prerequisites = @(
     }
 )
 
+# Windows PowerShell 5.1 ships with the execution policy Restricted, and THIS
+# script does not care - `irm | iex` runs a command string, not a file. The
+# tools it drives do care: a .ps1 shim on PATH (npm's claude.ps1) has to be
+# LOADED, and Restricted or AllSigned refuses. The user then gets a localised
+# .NET PSSecurityException with a fwlink pointer and no remedy (German-locale
+# field report 2026-08-14), so name the remedy up front. Informational only -
+# this never blocks the stage.
+function Show-ExecutionPolicyAdvice {
+    $policy = ''
+    try { $policy = [string](Get-ExecutionPolicy) } catch { return }
+    if (@('Restricted', 'AllSigned') -notcontains $policy) {
+        Write-Ok "Execution policy: $policy"
+        return
+    }
+
+    Write-Warn2 "PowerShell execution policy is $policy - loading .ps1 files is disabled for this account."
+    Write-Warn2 'This script is unaffected (irm | iex runs a command string), but the tool shims and installer scripts it calls are not.'
+    Write-Host  '    Fix it for your account only - no admin rights, no reboot:'
+    Write-Host  '      Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned'
+
+    # Group Policy outranks BOTH the CurrentUser scope and a -ExecutionPolicy
+    # Bypass command line, so on a managed machine the fix above silently does
+    # nothing. Show the scope table and send the user to IT right away.
+    try {
+        $scopes = @(Get-ExecutionPolicy -List)
+        $managed = @($scopes | Where-Object {
+            ($_.Scope -eq 'MachinePolicy' -or $_.Scope -eq 'UserPolicy') -and $_.ExecutionPolicy -ne 'Undefined'
+        })
+        if ($managed.Count -gt 0) {
+            Write-Warn2 'A Group Policy sets this - the command above cannot override it, and neither can -ExecutionPolicy Bypass. Your IT has to allow RemoteSigned for this account.'
+            $scopes | Format-Table -AutoSize | Out-Host
+        }
+    } catch { }
+}
+
+# npm's global bin on Windows holds shims and no executable at all:
+#   %APPDATA%\npm\claude       (sh script, for Git Bash / WSL)
+#   %APPDATA%\npm\claude.cmd   (batch shim -> node ...\cli.js)
+#   %APPDATA%\npm\claude.ps1   (PowerShell shim)
+# `npm config set prefix` moves that directory, so match its layout as well -
+# npm.cmd and a node_modules directory sit next to every package shim.
+function Test-NpmPrefixDirectory {
+    param([string]$Directory)
+    if ([string]::IsNullOrWhiteSpace($Directory)) { return $false }
+    $dir = $Directory.TrimEnd('\')
+    if ($env:APPDATA -and $dir -eq (Join-Path $env:APPDATA 'npm').TrimEnd('\')) { return $true }
+    if (Test-Path -LiteralPath (Join-Path $dir 'npm.cmd')) { return $true }
+    if (Test-Path -LiteralPath (Join-Path $dir 'node_modules')) { return $true }
+    return $false
+}
+
+# The removal line for a shim install. Only Claude Code names the package
+# manager that put it there, so every other tool gets a generic sentence
+# instead of a command that might be wrong.
+function Write-ShimRemovalCommand {
+    param([Parameter(Mandatory)][hashtable]$Tool)
+    $package = $Tool['NpmPackage']
+    if ($package) { Write-Host "      npm uninstall -g $package" }
+    else { Write-Host "      uninstall $($Tool.Name) with whatever package manager installed it" }
+}
+
+# Is what Get-Command resolved a package-manager shim instead of the real
+# executable? Two shapes matter on Windows:
+#   * an ExternalScript - a .ps1 on PATH. PowerShell prefers it over the .cmd
+#     and a Restricted execution policy then refuses to load it.
+#   * a .cmd/.bat under an npm prefix - startable from PowerShell and cmd, but
+#     invisible to .NET's CreateProcess, which appends only .exe and never
+#     consults PATHEXT. That is why the Dashboard's Setup Doctor reports
+#     "not installed" while `claude --version` works in the user's terminal.
+function Test-ShimCommand {
+    param([Parameter(Mandatory)][System.Management.Automation.CommandInfo]$Command)
+    if ($Command.CommandType -eq 'ExternalScript') { return $true }
+    if ($Command.CommandType -ne 'Application') { return $false }
+    if (-not $Command.Source) { return $false }
+    $ext = [System.IO.Path]::GetExtension($Command.Source)
+    if ($ext -ne '.cmd' -and $ext -ne '.bat') { return $false }
+    return (Test-NpmPrefixDirectory -Directory ([System.IO.Path]::GetDirectoryName($Command.Source)))
+}
+
 function Get-ToolStatus {
     param([Parameter(Mandatory)][hashtable]$Tool)
 
     $exe = $Tool.Command
     $status = 'Ok'
-    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) {
+    $source = ''
+    $cmd = Get-Command $exe -ErrorAction SilentlyContinue
+    if (-not $cmd) {
         # Off PATH is not the same as not installed: Claude Code's native
         # installer leaves ~\.local\bin unpersisted (see Add-UserPathEntry),
         # so every fresh window used to land here, report "not found" and
@@ -371,10 +522,19 @@ function Get-ToolStatus {
         # the MinMajor note below.
         $known = $Tool['KnownPath']
         if (-not ($known -and (Test-Path -LiteralPath $known))) {
-            return [pscustomobject]@{ Status = 'Missing'; Version = '' }
+            return [pscustomobject]@{ Status = 'Missing'; Version = ''; Source = '' }
         }
         $exe = $known
+        $source = $known
         $status = 'NotOnPath'
+    } else {
+        # Existence is not the whole answer: WHAT resolved decides too. A
+        # shim answers `--version` happily, so the old probe called it done
+        # and stage 1 skipped the native installer - leaving the Dashboard
+        # with no ~\.local\bin\claude.exe to fall back to, and no re-run of
+        # either tool able to fix it (field report 2026-08-14).
+        $source = [string]$cmd.Source
+        if (Test-ShimCommand -Command $cmd) { $status = 'ShimInstall' }
     }
 
     $probe = Invoke-Native -Exe $exe -Arguments @($Tool.VersionArg)
@@ -382,7 +542,7 @@ function Get-ToolStatus {
     if ($probe.Output -match '\d+(\.\d+)+') { $version = $Matches[0] }
     # Present but not answering - treat as absent so it gets (re)installed.
     if ($probe.ExitCode -ne 0 -and -not $version) {
-        return [pscustomobject]@{ Status = 'Missing'; Version = '' }
+        return [pscustomobject]@{ Status = 'Missing'; Version = ''; Source = '' }
     }
 
     # Indexer, not member access: only the Node entry defines MinMajor, and a
@@ -391,10 +551,10 @@ function Get-ToolStatus {
     if ($Tool['MinMajor'] -and $version) {
         $major = [int](($version -split '\.')[0])
         if ($major -lt $Tool['MinMajor']) {
-            return [pscustomobject]@{ Status = 'Outdated'; Version = $version }
+            return [pscustomobject]@{ Status = 'Outdated'; Version = $version; Source = $source }
         }
     }
-    return [pscustomobject]@{ Status = $status; Version = $version }
+    return [pscustomobject]@{ Status = $status; Version = $version; Source = $source }
 }
 
 # The plugin's hooks are bash scripts, so Git for Windows' bash is a hard
@@ -492,18 +652,57 @@ function Repair-BashShadowing {
     }
 }
 
+# A package-manager shim works in the user's own shell, so switching to the
+# native install is an OFFER: the installer guides, it never rips out a working
+# tool unasked (and it never runs `npm uninstall` for you). Returns $true when
+# the native installer should run.
+function Confirm-ShimUpgrade {
+    param([Parameter(Mandatory)][hashtable]$Tool, [string]$ResolvedPath)
+
+    Write-Warn2 "$($Tool.Name) is installed as a package-manager shim, not with its native installer."
+    if ($ResolvedPath) { Write-Host "      found: $ResolvedPath" }
+    Write-Host '    Why Polaris wants the native install:'
+    Write-Host '      * one supported shape - the Dashboard starts tools through the Windows API, which finds'
+    Write-Host '        only .exe files, so a shim reads as "not installed" in the Setup Doctor'
+    Write-Host '      * no Node coupling - the CLI survives Node upgrades and version-manager switches'
+    Write-Host '      * no npm global-bin PATH timing, and no .ps1 shim for an execution policy to block'
+
+    # Already installed natively: re-running the installer would be pure noise
+    # (v3.1.0 bare-machine field report). Only the shim copy still shadows it.
+    $known = $Tool['KnownPath']
+    if ($known -and (Test-Path -LiteralPath $known)) {
+        Write-Ok "The native install is already here - $known"
+        Write-Host '    Remove the shim copy so it stops shadowing it, then open a new window:'
+        Write-ShimRemovalCommand -Tool $Tool
+        return $false
+    }
+
+    Write-Host '    Installing it leaves the shim untouched - remove that one yourself afterwards:'
+    Write-ShimRemovalCommand -Tool $Tool
+    if ($DryRun) {
+        Write-Plan 'Would offer the native installer here (the shim is never removed automatically).'
+        return $true
+    }
+    $choice = Read-Choice -Prompt "Install $($Tool.Name) with its native installer now? (y=install, n=keep the shim)" -Options 'y','n' -Default 'y'
+    if ($choice -eq 'y') { return $true }
+    Write-Skip "$($Tool.Name) - keeping the shim; the Dashboard's Setup Doctor will keep reporting it as missing."
+    return $false
+}
+
 function Invoke-StagePrerequisites {
     Write-Section 'Stage 1 of 6 - prerequisites'
+    Show-ExecutionPolicyAdvice
 
     $probed = @()
     foreach ($tool in $Prerequisites) {
         $state = Get-ToolStatus -Tool $tool
-        $probed += [pscustomobject]@{ Definition = $tool; Status = $state.Status; Version = $state.Version }
+        $probed += [pscustomobject]@{ Definition = $tool; Status = $state.Status; Version = $state.Version; Source = $state.Source }
         switch ($state.Status) {
-            'Ok'        { Write-Ok    "$($tool.Name) - $($state.Version)" }
-            'Outdated'  { Write-Warn2 "$($tool.Name) - found $($state.Version), need $($tool.MinMajor) or newer" }
-            'NotOnPath' { Write-Warn2 "$($tool.Name) - installed ($($state.Version)) but not on PATH" }
-            'Missing'   { Write-Warn2 "$($tool.Name) - not found" }
+            'Ok'          { Write-Ok    "$($tool.Name) - $($state.Version)" }
+            'Outdated'    { Write-Warn2 "$($tool.Name) - found $($state.Version), need $($tool.MinMajor) or newer" }
+            'NotOnPath'   { Write-Warn2 "$($tool.Name) - installed ($($state.Version)) but not on PATH" }
+            'ShimInstall' { Write-Warn2 "$($tool.Name) - $($state.Version) via a package-manager shim ($($state.Source))" }
+            'Missing'     { Write-Warn2 "$($tool.Name) - not found" }
         }
     }
 
@@ -521,6 +720,21 @@ function Invoke-StagePrerequisites {
         }
         if ($def.Optional -and -not $IncludeDocker) {
             Write-Skip "$($def.Name) - optional, pass -IncludeDocker to install it"
+            continue
+        }
+        if ($entry.Status -eq 'ShimInstall') {
+            # Works in the user's own shell but is not the supported shape.
+            # Only the native-installer tool has a better shape to offer -
+            # anything else stays exactly as the user installed it.
+            if ($def.Installer -ne 'native') {
+                Write-Warn2 "$($def.Name) - resolved to a shim ($($entry.Source)) - leaving it as it is."
+                continue
+            }
+            if ($SkipClaudeCode) {
+                Write-Skip "$($def.Name) - shim kept (-SkipClaudeCode), the supported install is: $($def.Hint)"
+                continue
+            }
+            if (Confirm-ShimUpgrade -Tool $def -ResolvedPath $entry.Source) { $nativeWork += $entry }
             continue
         }
         if ($def.Installer -eq 'native') {
@@ -616,8 +830,19 @@ function Invoke-StagePrerequisites {
             $claudeBinDir = Join-Path $env:USERPROFILE '.local\bin'
             if (Test-Path -LiteralPath (Join-Path $claudeBinDir 'claude.exe')) {
                 Add-UserPathEntry -Directory $claudeBinDir
+                Write-Ok 'Claude Code installed'
+                if ($entry.Status -eq 'ShimInstall') {
+                    # ~\.local\bin lands at the END of PATH, so `claude` in a
+                    # shell still resolves to the shim until it is gone.
+                    Write-Warn2 'The shim copy is still installed and still wins in a shell - remove it, then open a new window:'
+                    Write-ShimRemovalCommand -Tool $entry.Definition
+                }
+            } elseif (Get-Command claude -ErrorAction SilentlyContinue) {
+                # No claude.exe where the native installer puts it, but
+                # something answers - report the old, laxer success line
+                # rather than crying wolf.
+                Write-Ok 'Claude Code installed'
             }
-            if (Get-Command claude -ErrorAction SilentlyContinue) { Write-Ok 'Claude Code installed' }
         }
     }
 
@@ -637,6 +862,7 @@ function Invoke-StagePrerequisites {
     $rows = @()
     $blocking = @()
     $optionalMissing = @()
+    $shimNotes = @()
     foreach ($tool in $Prerequisites) {
         $state = Get-ToolStatus -Tool $tool
         $rows += [pscustomobject]@{
@@ -646,6 +872,13 @@ function Invoke-StagePrerequisites {
             'Needed for' = $tool.Purpose
         }
         if ($state.Status -eq 'Ok') { continue }
+        if ($state.Status -eq 'ShimInstall') {
+            # Usable today - the user's own shell resolves it - just not the
+            # supported shape. Guidance below, never a hard gate: the offer
+            # was made above and declining it must not fail the stage.
+            $shimNotes += [pscustomobject]@{ Tool = $tool; Source = $state.Source }
+            continue
+        }
         if ($tool.Optional) { $optionalMissing += $tool } else { $blocking += $tool }
     }
     $rows | Format-Table -AutoSize | Out-Host
@@ -657,6 +890,13 @@ function Invoke-StagePrerequisites {
         Write-Warn2 'Git Bash not found - the plugin runs its hooks through bash. Install Git for Windows and re-run.'
     }
     [void](Repair-BashShadowing -GitBashPath $gitBash)
+
+    foreach ($note in $shimNotes) {
+        Write-Warn2 "$($note.Tool.Name) still resolves to a package-manager shim ($($note.Source)) - it works in this shell, but the Dashboard's Setup Doctor cannot start it."
+        Write-Host  '    Switch to the supported shape when you get a chance:'
+        Write-ShimRemovalCommand -Tool $note.Tool
+        if ($note.Tool['Hint']) { Write-Host "      $($note.Tool['Hint'])" }
+    }
 
     foreach ($tool in $blocking) {
         Write-Warn2 "$($tool.Name) is still not usable - close this window, open a NEW one and re-run this script (installers only extend PATH for new processes)."
@@ -672,6 +912,10 @@ function Invoke-StagePrerequisites {
     if ($blocking.Count -gt 0) {
         Set-StageResult 'Prerequisites' 'incomplete'
         throw 'Prerequisites incomplete - see the warnings above, then re-run this script.'
+    }
+    if ($shimNotes.Count -gt 0) {
+        Set-StageResult 'Prerequisites' 'ok (package-manager shim in place)'
+        return
     }
     Set-StageResult 'Prerequisites' 'ok'
 }
@@ -1109,7 +1353,9 @@ function Invoke-StageAnthropicSignIn {
         $prev = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
-            & claude
+            # Resolve first: a bare `& claude` picks npm's claude.ps1 over its
+            # .cmd and dies under a Restricted execution policy.
+            & (Resolve-NativeCommandPath -Name 'claude')
         } finally {
             $ErrorActionPreference = $prev
         }
@@ -1199,8 +1445,8 @@ Invoke-StageFinish
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA0qL3S8awAeTLE
-# KiSwY2dXoT+BNg7uHG6lW17HLA2Yu6CCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAG2pIosIwEJx1J
+# i2Vn7Tt1CisCsWSA0ZRCyZMfVcQ3xaCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1274,20 +1520,20 @@ Invoke-StageFinish
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIJDsS20GkCNP
-# 4W9/UXhpwrTXcUPbWafjoXE+qh2Xvrr3MA0GCSqGSIb3DQEBAQUABIIBgGjnp7+/
-# wMYBo29tNwO459pMvSScsmGrQViZWDFucBYgRSjJipgDljeUMtBZPGJA0TV/Z4HG
-# DG9cNWEVcojjzJW7f/0pFj6zkoSYVk1mvDQVZkbq3nKkDfsL8C510K16QBrmcOpR
-# Cn+0DS72KvqvFT2irjIvUr88F8ocxJY2mSSqZP3RO2jB4mM+OeYTS4kqxdm9xPa+
-# 6Bb9lfS8mPuckSMRZOW5LQkqMrH3vZ0TqmUya0Qwq6n8HIQxyECI/Gr5hK+chbsX
-# IYR4MCyhSMQb2/I05mh03z4x9ycb8KwOAVgmnVKhVIuBVPAiLMGCzCqJv+LygY3c
-# CouCwfMgOo0h94fQ/+5oa0kxBk1fOxCtX5T+DZ9iTqrQ8gGZppFo4Patav7PlMpL
-# b8wtmx6hLCWAGtqFjJvPeZrTZ02tqz5p5Jpbr3SKuR68nQUcsPRsRVkR/gN3Ueqp
-# JQ3Nl5PmG37Zl5YoD6/5PhZVduQr9kEHFXA2q2r65JCLVp6ebGaLbTlgdKGCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIPhfmQ8/AqDG
+# br+f8UIpx4/ruOvEYTUkyJdS7/LdPRlzMA0GCSqGSIb3DQEBAQUABIIBgFCdgl6j
+# YQvk8haZTkJ4p8FC7jY6Sg5G/OLYUlmTcl+Xdp2e5SZr00AyWAknomAlOLI3EGmu
+# i++4635H6dUyYZlwx38QCE4gNJ7rUDodszLpeDMlf0P/wgHA5Y+oc8icHAJ6xTW4
+# GHpiE8Wd2J+9erEY8Rd8kYegOxlSj7WXyCv8KlVw0R/X5dpdy6akUmVGlJ6kZ0N/
+# r0UB5fmF9ZrdcFfjKqFdMCnKyDtU3Fg97T7hCP0TbeG+qgvx9BouMIqARcr0ACWZ
+# Jwx8RHTKhR24B5+mtrHsiV28vrR6gLZ4OpPMyewG2KCuNtSj/IT3KoNwD3SbMgjx
+# xt0JzOe5hAB5dFyIRxvQVB3+Obz7aXrUMWkyRVK1s2n4G1C3vB00Um1N02u7VYoT
+# +rdEjveJb1E8tsQ4bGTX8TG0Ifh1OyZKNE8QXtuJJhpqygSfKzaB92Q1hujiJNsC
+# 6DfmMnQydAueF5esP21o5yWZKF+fkBlXqrtz7grdtGBA9lQJKGuk5yuTQ6GCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQgr8ragfjncEKzC/FHf9cjokfz+dxzAFIy
-# F4DCMhzaNTECBwqofG83K84YDzIwMjYwODEzMjE0NDM4WjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgD7lcyZmklrcqa4fqHQZsC3OmD+AQNGVv
+# DJttCRTvm4UCBwqofG8kWcsYDzIwMjYwODE0MTA0MzI4WjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -1395,22 +1641,22 @@ Invoke-StageFinish
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA4MTMyMTQ0MzhaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDDt
-# N3Uu1js/MXkDWgw4OKWwm9RoRrT9v6WmWaQZk9mZ/sSkAw+YGY9oZVvc763Nn3Uw
+# DQEJBTEPFw0yNjA4MTQxMDQzMjhaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDBJ
+# JfrR3SX896KWEMGnz2eouIC6/IHm6KF5j6J9zmDX+aCSf013kUuCCAtQ5HFyFKQw
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIArJKNMnorGBB/ZXXf
-# GoOtbDktH0hoosJCYzAlvAp2TdIJ8B5HcvSRq2Lv5ifiUiMpTU6JlvIrruklbVww
-# KLLy/JxphmjK+7SmuidVc9pROduftaT9sGPjoEEGMllCSsZQInoOlqp1kcGXgLmZ
-# j/w5zMUtNPzIp+AJO8GH/SVQZKZrppEi3bU7ptwizy+9ril06shRER7VNgmOkPhb
-# 7OXOvAgPehBdoDRNWKuRGi6p9FU3YUh0zcVMzCyuQek+1YSi23yL9Za6Pr3NI/4i
-# PdbDMaBhP/zYs4Tlq+p9scOB98vg57tIfnAOxgqByCr+PLiskuVEMzXk360hfn5j
-# w6Bzdm81m7cgpB81VUX0vUa9eA4HIhC2XJmTWEPvZXvXMEZMJyFog6naOna2BFvN
-# Ho6jpTrDy+CwW6GDKOMm7OuF60af/YUlLwtmrjdR8ZZVLoo4UnP9Yh6tXx7+ksxw
-# A8MjE25ftgWPy6iD9bO9TnJn9kL33n1Jo9oXe/4dsLDBeGwsKR2je6POepOvByTw
-# nwg9YWRPOfw+NAN7FrWl7eBTMz6wYh98KRizr1KnfxZMwOVC23ykSQ5Fxzg2YrZk
-# T2FVU2AGDE6snYQQQol0KLjZg2u6VsF/qna+4+Qa+e8QoOPH7o7vKYzbr0Wi3RSp
-# UuTlfXVncpt3ih1oBg6Bv0xhcKI=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIApghDaMdAOT3DuNAu
+# uyEeEiF4RMtLzHcrNryz/n5ZHYcKU1aCwMWRIEwcEA4pzL1uOo73QXF39csoQ/z6
+# Ahfej8UP71UzNZoWmKNA8bi+lU1qCGY83EqwrdX81kpmS/zZbD0/p9AE/Qysvgr+
+# b2JBJFyt+4/E1Ud5uWUBxngkCLo/9vu84hJL4PwRMSIEVzea/8SBbWVVjnKkohu6
+# VsnAlTnyC9CDiSgU3BYsTp9UYLBZVftmQKTC0AeXbuLV7nrIY4ue5EoSpZhWufvM
+# 5LS+gNz9PMTAUZgZ4Q1do5EXAeSWzbJADkNUaNI64+KD7a65ayQGHs/i5cTs0OWy
+# Ul42wVGppwR/F9yY8HFMykfz0qbyErSVPrPUEl3Nudi1VnRU63hV5CGxuUlT5Gig
+# zZVMB6MvySfRd3FuMqBMoHdtB5m0sjUsvpxmszuBQquNsDJhOV6ufnzGs7XEz2EJ
+# zt81fvbeYEBth9D8ZAtD8FFDhVtTyIFMIFKorEvARfwIShHAfgRPRyhEEzxf/G/c
+# I7Fd+QNOmTU8Oadkg7dXhBob7yrtAybZbC/raqbae7WAhX5nReENYtWBT9WMWBER
+# cehnbgCDk8EYQmN/V0SKhAdqEx9aH04cS3WD4qOsktB4snXm68OuBBhGdC6S6yig
+# PesHEnD1+0B/bi3XF3UeK3RbXo8=
 # SIG # End signature block
