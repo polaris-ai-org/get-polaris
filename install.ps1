@@ -1,11 +1,17 @@
 <#
 .SYNOPSIS
-    Polaris AI one-liner installer - everything from a bare Windows machine to
-    an opened Dashboard.
+    Polaris AI bootstrap installer for developers and CI - everything from a
+    bare Windows machine to an opened Dashboard, scripted.
 
 .DESCRIPTION
-    This is the canonical Polaris install script. Run it straight from the
-    public bootstrap repo:
+    THIS IS THE DEVELOPER AND CI PATH. If you just want to use Polaris, do not
+    run this: get the Polaris front-door installer from the Polaris download
+    page and double-click it. That installer needs no terminal, no GitHub
+    account and no sign-in, and it is the primary path from ADR 044 on. Keep
+    this script for the machines you script - your own dev box, a build agent,
+    an IT provisioning run, a container image.
+
+    Run it straight from the public bootstrap repo:
 
         irm https://raw.githubusercontent.com/polaris-ai-org/get-polaris/main/install.ps1 | iex
 
@@ -20,27 +26,32 @@
         powershell -ExecutionPolicy Bypass -File install.ps1 -DryRun
 
     The script walks six stages, each idempotent (safe to re-run; done work is
-    skipped):
+    skipped). Stages 2 and 3 drop out entirely on the public download path -
+    see WHERE THE DASHBOARD COMES FROM below:
 
-      1. Prerequisites  - Git, Node.js LTS, GitHub CLI via winget (Docker
-                          Desktop opt-in via -IncludeDocker); Claude Code via
-                          its native installer - an existing npm install is
-                          detected and offered the switch, never removed.
-                          Reports a blocking execution policy with its fix,
-                          verifies Git Bash, and reports which of the two
-                          Windows bash.exe shadows (if any) sits in front of
-                          it on PATH.
-      2. GitHub sign-in - one browser device-flow login, `gh auth setup-git`,
-                          and (when Docker is present) GHCR. Known traps -
-                          a shadowing GH_TOKEN, a fine-grained PAT, the WSL
-                          bash app execution alias - get guided fixes with a
-                          re-check loop.
+      1. Prerequisites  - Git via winget and Claude Code via its native
+                          installer (an existing npm install is detected and
+                          offered the switch, never removed). Node.js is
+                          DETECTED ONLY and never installed: the Dashboard
+                          package brings its own Node runtime. The GitHub CLI
+                          is installed only with -WithAgentTools, Docker
+                          Desktop only with -IncludeDocker. Reports a blocking
+                          execution policy with its fix, verifies Git Bash, and
+                          reports which of the two Windows bash.exe shadows (if
+                          any) sits in front of it on PATH.
+      2. GitHub sign-in - only when GitHub is on this machine's path at all
+                          (-WithAgentTools, or no public download host
+                          configured). One browser device-flow login,
+                          `gh auth setup-git`, and (when Docker is present)
+                          GHCR. Known traps - a shadowing GH_TOKEN, a
+                          fine-grained PAT, the WSL bash app execution alias -
+                          get guided fixes with a re-check loop.
       3. Polaris plugin - non-interactive `claude plugin` install from the
-                          private dist repo.
-      4. Dashboard      - downloads and runs the Setup package from the dist
-                          repo's latest release (silent, per-user). Falls back
-                          to the plain-EXE install for releases that predate
-                          the Setup package.
+                          private dist repo. Skipped on the public download
+                          path: the installed Dashboard bundles the plugin and
+                          its Setup Doctor registers it on first run.
+      4. Dashboard      - downloads and runs the signed Setup package, silent
+                          and per-user. Two sources, see below.
       5. Claude sign-in - detects existing Anthropic credentials (presence
                           only - values are never read or printed) and offers
                           a guided browser sign-in. Never a hard failure: the
@@ -48,18 +59,48 @@
                           asks again on first use.
       6. Finish         - open the Polaris Dashboard.
 
-    Stages 3 and 4 need the stage-2 sign-in (the dist repo is private). If you
-    skip or fail a sign-in, later stages degrade to printed instructions
-    instead of aborting.
+    WHERE THE DASHBOARD COMES FROM (two sources, one switch)
+
+      * PUBLIC DOWNLOAD - used when a download host is configured, either by
+        the $DefaultDownloadBaseUrl constant below or by -DownloadBaseUrl.
+        Stage 4 fetches <base>/PolarisAI.Dashboard-win-Setup.exe and
+        <base>/SHA256SUMS over HTTPS, verifies the SHA-256 and runs the
+        installer. No GitHub identity is involved anywhere on this path, so
+        stages 2 and 3 are skipped.
+      * PRIVATE DIST RELEASE - used when no host is configured, which is the
+        shipped default until the public host exists. Stage 4 then does exactly
+        what it always did: `gh release download` from the private dist repo,
+        which needs the stage-2 sign-in. Stages 2 and 3 run.
+
+    Either way the Setup package is checked twice before it is started: its
+    SHA-256 against the published SHA256SUMS (public path only - the dist path
+    is already an authenticated download), and its Authenticode signature
+    against the pinned Polaris signing certificate. Either check failing is a
+    fatal stage failure, never a warning.
+
+    If you skip or fail a sign-in on the GitHub path, later stages degrade to
+    printed instructions instead of aborting.
+
+    EXIT CODE (for CI and IT wrappers). Run as a file
+    (`powershell -File install.ps1 ...`) the script exits 1 when any stage
+    failed - a download that did not arrive, a checksum or signature mismatch,
+    an installer that exited non-zero, nothing on disk afterwards - and 0
+    otherwise. Skipped stages are not failures, and -DryRun always exits 0.
+    Under `irm | iex` no exit code is set at all, because there `exit` would
+    close the user's console window; check the summary table instead.
 
     WHAT YOU NEED BEFORE RUNNING THIS
       * Windows 10/11. Windows PowerShell 5.1 (preinstalled) is enough.
       * winget - preinstalled on Windows 11; on Windows 10 install
         "App Installer" from the Microsoft Store (https://aka.ms/getwinget).
-      * Permission to approve UAC prompts (winget installs are machine-wide).
-        If you are not a local administrator, your IT has to run stage 1.
-      * A GitHub account with Read access to polaris-ai-org/PolarisAI-dist
-        (ask the maintainer; you will receive an email invite to accept).
+      * Permission to approve UAC prompts (the winget installs are
+        machine-wide). If you are not a local administrator, your IT has to run
+        stage 1.
+      * ONLY on the GitHub path (no download host configured) or with
+        -WithAgentTools: a GitHub account with Read access to
+        polaris-ai-org/PolarisAI-dist (ask the maintainer; you will receive an
+        email invite to accept). Agent users additionally need the GHCR package
+        grant.
 
     Run it from a NORMAL PowerShell window - do not "Run as administrator".
     The UAC prompts handle elevation per package; a per-user install done as
@@ -70,7 +111,23 @@
 
 .PARAMETER IncludeDocker
     Also install Docker Desktop and log it in to GHCR. Needed only to run
-    agents in containers; large install, so it is opt-in.
+    agents in containers; large install, so it is opt-in. Implies
+    -WithAgentTools, because the agent image is pulled from GHCR.
+
+.PARAMETER WithAgentTools
+    Install the GitHub CLI and run the GitHub sign-in stage. Only Docker/agent
+    users need this: pulling the agent image needs a GHCR grant, and that grant
+    is reached with `gh`. Off by default, which is what takes the third UAC
+    prompt (the GitHub.cli MSI) and the whole GitHub identity off a normal
+    user's path.
+
+.PARAMETER DownloadBaseUrl
+    Public download route to fetch the Dashboard Setup package from, i.e.
+    https://polaris.chrisnowottny.com/download (no trailing slash), which is
+    live after the Cloudflare setup in docs/r2-release-hosting.md; until then
+    the GitHub release remains the source. Overrides the
+    $DefaultDownloadBaseUrl constant in the script. Setting it takes GitHub off
+    this run entirely unless -WithAgentTools is also passed.
 
 .PARAMETER SkipClaudeCode
     Do not install Claude Code even if it is missing (just report it).
@@ -88,6 +145,9 @@
 .EXAMPLE
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/polaris-ai-org/get-polaris/main/install.ps1))) -DryRun -IncludeDocker
 
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File install.ps1 -DownloadBaseUrl https://polaris.chrisnowottny.com/download
+
 .NOTES
     Source of truth: docs/onboarding/install.ps1 in the private PolarisAI
     source repo. The release pipeline publishes it to the public bootstrap
@@ -98,9 +158,11 @@
 param(
     [switch]$DryRun,
     [switch]$IncludeDocker,
+    [switch]$WithAgentTools,
     [switch]$SkipClaudeCode,
     [switch]$SkipDashboard,
-    [switch]$SkipAnthropicSignIn
+    [switch]$SkipAnthropicSignIn,
+    [string]$DownloadBaseUrl = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -112,8 +174,31 @@ $ErrorActionPreference = 'Stop'
 # PowerShell 7's default anyway; intentionally not restored on exit.
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
 
+# TLS 1.2 for EVERY web call this script makes - the Claude Code installer in
+# stage 1 (Invoke-RestMethod) as much as the public download in stage 4.
+# Windows PowerShell 5.1 on an unpatched Windows 10 image still negotiates
+# SSL3/TLS1.0, which every modern host refuses with "Could not create SSL/TLS
+# secure channel"; doing this inside stage 4 only would leave stage 1 dying on
+# exactly the machines that need it most. OR it in rather than assign it, so a
+# newer runtime keeps whatever stronger suites it already allows. Process
+# scoped: nothing is written anywhere.
+function Enable-Tls12 {
+    try {
+        $current = [Net.ServicePointManager]::SecurityProtocol
+        if (($current -band [Net.SecurityProtocolType]::Tls12) -ne [Net.SecurityProtocolType]::Tls12) {
+            [Net.ServicePointManager]::SecurityProtocol = $current -bor [Net.SecurityProtocolType]::Tls12
+        }
+    } catch { }
+}
+Enable-Tls12
+
+# 5.1 redraws the Invoke-WebRequest progress bar on every chunk, which costs
+# minutes on a 150 MB package. Set once here beside $ErrorActionPreference and,
+# like it, deliberately not restored on exit.
+$ProgressPreference = 'SilentlyContinue'
+
 # Stamped by the release pipeline; 'dev' when run from a working tree.
-$script:BootstrapVersion = '3.8.1'
+$script:BootstrapVersion = '3.9.0'
 
 # --- Constants ----------------------------------------------------------------
 
@@ -127,13 +212,80 @@ $PluginSpec        = "polaris@$MarketplaceName"
 $SetupAssetPattern = '*Setup.exe'
 $SetupSilentArg    = '--silent'
 
-# Legacy copy-EXE layout (pre-Velopack releases) - the fallback install.
-$LegacyInstallDir  = Join-Path $env:LOCALAPPDATA 'PolarisAI\Dashboard'
-$LegacyExeName     = 'PolarisAI.Dashboard.exe'
-$ShortcutName      = 'Polaris AI Dashboard.lnk'
-
 # Velopack per-user install layout (pack id PolarisAI.Dashboard).
 $VelopackExePath   = Join-Path $env:LOCALAPPDATA 'PolarisAI.Dashboard\current\PolarisAI.Dashboard.exe'
+
+# Authenticode pin for everything this script downloads and runs. KEEP IN
+# LOCKSTEP with $CertThumbprint in scripts/release/pack-sign-publish.ps1 (:201),
+# which signs the artifacts and verifies them against this same value before
+# publishing. A checksum only proves the bytes match what the host served; this
+# proves who built them, which is what matters once the download is public and
+# unauthenticated (C065, ADR 044).
+$SigningCertThumbprint = 'D8ED4F2FC356A149FEB96D387A313DD6C0071978'
+
+# --- Public download route (C091 Move 1, ADR 044) ------------------------------
+#
+# The public half of the R2 host: GET <base>/<file>, no authentication, allow
+# list Setup.exe / Portable.zip / .msi / install.ps1 / SHA256SUMS /
+# QUICKSTART.md (infra/licence-feed-worker/README.md). The licensed update feed
+# lives on the same host under /updates and is none of this script's business.
+#
+# The intended value is https://polaris.chrisnowottny.com/download (no trailing
+# slash), the custom domain ADR 044 item 12 settles.
+#
+# EMPTY IS THE SHIPPED DEFAULT and it stays empty on purpose: that host does not
+# answer yet, and a non-empty value here would make every run download from a
+# host that is not there. While it is empty this script behaves exactly as it
+# always did - stage 4 downloads from the private dist release with `gh`, and
+# stages 2 and 3 run. Fill it in only when BOTH are true: the Cloudflare setup in
+# docs/r2-release-hosting.md has been done (bucket, Worker, the DNS move and the
+# custom domain), and the transition release has been published to R2 so the
+# artifacts the script asks for are actually under /download. Until then, pass
+# -DownloadBaseUrl for a one-off run against the *.workers.dev stopgap.
+$DefaultDownloadBaseUrl = ''
+
+# Public artifact names, as pack-sign-publish.ps1 writes them into SHA256SUMS.
+# Fixed, not patterns: an unauthenticated GET needs an exact key, and the
+# checksum line has to name the same file.
+$PublicSetupAssetName = 'PolarisAI.Dashboard-win-Setup.exe'
+$PublicSumsName       = 'SHA256SUMS'
+
+# Resolved once: the parameter wins over the constant, empty means "no public
+# host, use the private dist release".
+$script:DownloadBase = ''
+foreach ($candidate in @($DownloadBaseUrl, $DefaultDownloadBaseUrl)) {
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) { $script:DownloadBase = $candidate.Trim().TrimEnd('/'); break }
+}
+$script:UsePublicDownload = -not [string]::IsNullOrWhiteSpace($script:DownloadBase)
+
+# Validate it here, before stage 1 touches anything: a typo in a download host
+# must be a parameter error at second zero, not a confusing failure four stages
+# later. https only (this base is where an unauthenticated installer download
+# comes from - plain http would let anyone on the path swap the bytes AND the
+# SHA256SUMS that vouch for them), absolute, and no query or fragment, because
+# the file name is appended straight onto it.
+if ($script:UsePublicDownload) {
+    $parsedBase = $null
+    $baseIsValid = [Uri]::TryCreate($script:DownloadBase, [UriKind]::Absolute, [ref]$parsedBase)
+    if ($baseIsValid) {
+        $baseIsValid = ($parsedBase.Scheme -eq 'https') -and
+                       [string]::IsNullOrEmpty($parsedBase.Query) -and
+                       [string]::IsNullOrEmpty($parsedBase.Fragment)
+    }
+    if (-not $baseIsValid) {
+        throw "Invalid download base URL '$($script:DownloadBase)'. It must be an absolute https:// URL with no query string and no fragment, e.g. https://polaris.chrisnowottny.com/download. Fix -DownloadBaseUrl (or the `$DefaultDownloadBaseUrl constant) and re-run."
+    }
+}
+
+# -IncludeDocker implies the agent tool chain: a container agent pulls its image
+# from GHCR, and that grant is reached with `gh`.
+$script:AgentTools = [bool]($WithAgentTools -or $IncludeDocker)
+
+# Is a GitHub identity on this machine's path at all? Two reasons only: the
+# agent tools need it for GHCR, and the private dist release needs it when no
+# public download host is configured. Everything GitHub-shaped in this script
+# hangs off this one flag.
+$script:GitHubNeeded = [bool]($script:AgentTools -or -not $script:UsePublicDownload)
 
 # --- Output helpers -----------------------------------------------------------
 
@@ -145,9 +297,23 @@ function Write-Step($text)    { Write-Host "    [..] $text" }
 function Write-Plan($text)    { Write-Host "    [dry-run] $text" -ForegroundColor DarkCyan }
 
 # Per-stage outcome collected for the finish summary.
+#
+# -Failed is the exit-code signal, and the rule is deliberate: a stage that
+# FAILED (a download that did not arrive, a checksum or signature that did not
+# match, an installer that exited non-zero) sets it; a stage that was SKIPPED
+# does not. Without it this script exited 0 whatever happened - only the stage-1
+# `throw` was ever fatal - so a CI or IT wrapper went green on a checksum
+# mismatch with no Dashboard installed.
 $script:StageResults = New-Object System.Collections.ArrayList
-function Set-StageResult([string]$Stage, [string]$Result) {
+$script:FailedStages = New-Object System.Collections.ArrayList
+function Set-StageResult {
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [Parameter(Mandatory)][string]$Result,
+        [switch]$Failed
+    )
     [void]$script:StageResults.Add([pscustomobject]@{ Stage = $Stage; Result = $Result })
+    if ($Failed) { [void]$script:FailedStages.Add($Stage) }
 }
 
 # --- Process helpers ----------------------------------------------------------
@@ -224,9 +390,24 @@ function Invoke-Native {
     $resolved = Resolve-NativeCommandPath -Name $Exe
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    # Sentinel. When the process never STARTS, $LASTEXITCODE keeps whatever the
+    # PREVIOUS native call left in it, and a stale 0 reads as success - every
+    # caller then believes a tool it never ran answered fine. Clear it first and
+    # report "did not start" as -1.
+    $global:LASTEXITCODE = $null
     try {
         $output = & $resolved @Arguments 2>&1 | Out-String
-        return [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = -1 }
+        return [pscustomobject]@{ Output = $output; ExitCode = $code }
+    } catch {
+        # A name that resolves to nothing at all raises CommandNotFoundException
+        # from the call operator, which is terminating whatever
+        # $ErrorActionPreference says - so without this catch it escaped past
+        # the whole point of this function and tore the script down with a raw
+        # .NET error. Hand the caller a failed call instead; they all already
+        # classify a non-zero exit code and print the output.
+        return [pscustomobject]@{ Output = "$($_.Exception.Message)"; ExitCode = -1 }
     } finally {
         $ErrorActionPreference = $prev
     }
@@ -257,12 +438,27 @@ function Read-Choice {
 # Installers extend the *stored* PATH; the running process keeps its startup
 # copy. Re-reading both scopes makes freshly installed tools visible right away.
 function Update-SessionPath {
+    # MERGE, never replace. Overwriting $env:Path with Machine+User deletes any
+    # entry that exists only in this process - a CI runner's tool cache, a
+    # container image's own additions, a directory a caller prepended before
+    # invoking this script - and the loss is silent. Stored scopes come first so
+    # a freshly installed tool wins over a stale process copy, then whatever
+    # this process already had; duplicates are dropped case-insensitively.
     $parts = @()
     foreach ($scope in 'Machine', 'User') {
         $value = [Environment]::GetEnvironmentVariable('Path', $scope)
-        if ($value) { $parts += $value }
+        if ($value) { $parts += ($value -split ';') }
     }
-    if ($parts.Count -gt 0) { $env:Path = ($parts -join ';') }
+    if ($env:Path) { $parts += ($env:Path -split ';') }
+
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $merged = @()
+    foreach ($part in $parts) {
+        $entry = "$part".Trim()
+        if (-not $entry) { continue }
+        if ($seen.Add($entry.TrimEnd('\'))) { $merged += $entry }
+    }
+    if ($merged.Count -gt 0) { $env:Path = ($merged -join ';') }
     # Claude Code's native installer lands in ~\.local\bin; make sure the
     # verification pass sees it even before a new window picks up the PATH.
     $localBin = Join-Path $env:USERPROFILE '.local\bin'
@@ -407,22 +603,38 @@ $Prerequisites = @(
         NpmPackage = '@anthropic-ai/claude-code'
     },
     @{
-        Name = 'Node.js 18+'; Command = 'node'; VersionArg = '--version'
-        Installer = 'winget'; WingetId = 'OpenJS.NodeJS.LTS'; MinMajor = 18
-        Purpose = 'plugin hooks & scripts'
+        # DETECT ONLY, never installed (C091 Move 1 step 5). The Dashboard
+        # package ships runtime\node\node.exe and puts it on the user PATH when
+        # nothing else answers, so installing OpenJS.NodeJS.LTS here would buy a
+        # per-machine WiX MSI, a UAC prompt and a second Node to keep patched.
+        # A Node already on PATH still wins, so report the version as
+        # information - it is what a dev box will use for the plugin's scripts.
+        Name = 'Node.js (detected only)'; Command = 'node'; VersionArg = '--version'
+        Installer = 'none'; DetectOnly = $true; MinMajor = 18
+        Purpose = 'optional - the Dashboard brings its own Node runtime'
+        OptionalHint = 'the Dashboard package brings its own Node runtime; a system Node is optional.'
     },
     @{
         Name = 'Git'; Command = 'git'; VersionArg = '--version'
         Installer = 'winget'; WingetId = 'Git.Git'; Purpose = 'plugin install + bash for hooks'
     },
     @{
+        # Installed only when GitHub is on this run's path at all, i.e. with
+        # -WithAgentTools (the GHCR grant for the agent image) or while no
+        # public download host is configured and stage 4 still uses the private
+        # dist release. GitHub.cli is a WiX MSI into Program Files, so leaving
+        # it out is the third UAC prompt gone (C091 section 1, section 13
+        # item 5).
         Name = 'GitHub CLI'; Command = 'gh'; VersionArg = '--version'
-        Installer = 'winget'; WingetId = 'GitHub.cli'; Purpose = 'sign-in + downloads'
+        Installer = 'winget'; WingetId = 'GitHub.cli'; NeedsGitHub = $true
+        Purpose = 'GitHub path only: dist download, agent GHCR sign-in'
+        OptionalHint = 'nothing on this run needs GitHub - re-run with -WithAgentTools if you add container agents.'
     },
     @{
         Name = 'Docker Desktop'; Command = 'docker'; VersionArg = '--version'
         Installer = 'winget'; WingetId = 'Docker.DockerDesktop'; Optional = $true
         Purpose = 'agents only (optional)'
+        OptionalHint = 're-run with -IncludeDocker if you want to run agents in containers.'
     }
 )
 
@@ -567,14 +779,20 @@ function Find-GitBash {
         $candidate = Join-Path $gitRoot 'bin\bash.exe'
         if (Test-Path $candidate) { return $candidate }
     }
-    $roots = @{
-        $env:ProgramFiles          = 'Git\bin\bash.exe'
-        ${env:ProgramFiles(x86)}   = 'Git\bin\bash.exe'
-        $env:LOCALAPPDATA          = 'Programs\Git\bin\bash.exe'
-    }
-    foreach ($root in $roots.Keys) {
-        if (-not $root) { continue }
-        $candidate = Join-Path $root $roots[$root]
+    # An ordered list, not a hashtable keyed by the environment variables: a
+    # null key (ProgramFiles(x86) is absent on ARM64 and on a stripped image)
+    # throws on the literal itself, and so does a duplicate key when two of them
+    # happen to be equal. Because Repair-BashShadowing takes (Find-GitBash) as a
+    # parameter default, that throw landed during parameter binding, which is a
+    # confusing place to read a stack trace from.
+    $roots = @(
+        [pscustomobject]@{ Root = $env:ProgramFiles;        Relative = 'Git\bin\bash.exe' },
+        [pscustomobject]@{ Root = ${env:ProgramFiles(x86)}; Relative = 'Git\bin\bash.exe' },
+        [pscustomobject]@{ Root = $env:LOCALAPPDATA;        Relative = 'Programs\Git\bin\bash.exe' }
+    )
+    foreach ($root in $roots) {
+        if ([string]::IsNullOrWhiteSpace($root.Root)) { continue }
+        $candidate = Join-Path $root.Root $root.Relative
         if (Test-Path $candidate) { return $candidate }
     }
     return $null
@@ -697,9 +915,19 @@ function Invoke-StagePrerequisites {
     foreach ($tool in $Prerequisites) {
         $state = Get-ToolStatus -Tool $tool
         $probed += [pscustomobject]@{ Definition = $tool; Status = $state.Status; Version = $state.Version; Source = $state.Source }
+        if ($state.Status -eq 'Ok') { Write-Ok "$($tool.Name) - $($state.Version)"; continue }
+        # A detect-only row is information, never a finding: nothing here can
+        # install it and nothing downstream is blocked by its absence.
+        if ($tool['DetectOnly']) {
+            if ($state.Status -eq 'Outdated') {
+                Write-Skip "$($tool.Name) - found $($state.Version), older than $($tool['MinMajor']); the Dashboard uses its bundled runtime instead"
+            } else {
+                Write-Skip "$($tool.Name) - none on PATH; the Dashboard uses its bundled runtime"
+            }
+            continue
+        }
         switch ($state.Status) {
-            'Ok'          { Write-Ok    "$($tool.Name) - $($state.Version)" }
-            'Outdated'    { Write-Warn2 "$($tool.Name) - found $($state.Version), need $($tool.MinMajor) or newer" }
+            'Outdated'    { Write-Warn2 "$($tool.Name) - found $($state.Version), need $($tool['MinMajor']) or newer" }
             'NotOnPath'   { Write-Warn2 "$($tool.Name) - installed ($($state.Version)) but not on PATH" }
             'ShimInstall' { Write-Warn2 "$($tool.Name) - $($state.Version) via a package-manager shim ($($state.Source))" }
             'Missing'     { Write-Warn2 "$($tool.Name) - not found" }
@@ -712,6 +940,14 @@ function Invoke-StagePrerequisites {
     foreach ($entry in $probed) {
         if ($entry.Status -eq 'Ok') { continue }
         $def = $entry.Definition
+        if ($def['DetectOnly']) {
+            Write-Skip "$($def.Name) - nothing to install; the Dashboard package carries its own Node runtime"
+            continue
+        }
+        if ($def['NeedsGitHub'] -and -not $script:GitHubNeeded) {
+            Write-Skip "$($def.Name) - nothing on this run touches GitHub, pass -WithAgentTools if you add container agents"
+            continue
+        }
         if ($entry.Status -eq 'NotOnPath') {
             # On disk, only PATH is broken - reinstalling would change nothing
             # (the installer leaves PATH unpersisted); repair the PATH instead.
@@ -749,7 +985,7 @@ function Invoke-StagePrerequisites {
     }
 
     if ($wingetWork.Count -gt 0 -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw "winget not found. Install 'App Installer' from the Microsoft Store (https://aka.ms/getwinget) and re-run, or install the tools manually: Node.js https://nodejs.org, Git https://git-scm.com/download/win, GitHub CLI https://cli.github.com."
+        throw "winget not found. Install 'App Installer' from the Microsoft Store (https://aka.ms/getwinget) and re-run, or install the tools manually: Git https://git-scm.com/download/win, GitHub CLI https://cli.github.com (only with -WithAgentTools), Docker Desktop https://docs.docker.com/desktop/ (only with -IncludeDocker)."
     }
 
     if ($DryRun) {
@@ -879,7 +1115,14 @@ function Invoke-StagePrerequisites {
             $shimNotes += [pscustomobject]@{ Tool = $tool; Source = $state.Source }
             continue
         }
-        if ($tool.Optional) { $optionalMissing += $tool } else { $blocking += $tool }
+        # Not blocking: an optional tool, a detect-only row, or a GitHub tool on
+        # a run that never touches GitHub. The status rides along so the closing
+        # note can say "older than required" instead of "not installed".
+        if ($tool['Optional'] -or $tool['DetectOnly'] -or ($tool['NeedsGitHub'] -and -not $script:GitHubNeeded)) {
+            $optionalMissing += [pscustomobject]@{ Tool = $tool; Status = $state.Status }
+        } else {
+            $blocking += $tool
+        }
     }
     $rows | Format-Table -AutoSize | Out-Host
 
@@ -905,8 +1148,11 @@ function Invoke-StagePrerequisites {
     if ($restartPending) {
         Write-Warn2 'Restart Windows to finish an installer that asked for it, then re-run this script.'
     }
-    foreach ($tool in $optionalMissing) {
-        Write-Skip "$($tool.Name) is not installed - re-run with -IncludeDocker if you want to run agents in containers."
+    foreach ($item in $optionalMissing) {
+        $hint = $item.Tool['OptionalHint']
+        if (-not $hint) { $hint = 're-run with -IncludeDocker if you want to run agents in containers.' }
+        if ($item.Status -eq 'Outdated') { Write-Skip "$($item.Tool.Name) is older than this script asks for - $hint" }
+        else { Write-Skip "$($item.Tool.Name) is not installed - $hint" }
     }
 
     if ($blocking.Count -gt 0) {
@@ -982,6 +1228,20 @@ function Test-FineGrainedPat {
 function Invoke-StageGitHubAuth {
     Write-Section 'Stage 2 of 6 - GitHub sign-in'
 
+    # The whole stage exists to reach the private dist repo and GHCR. With a
+    # public download host configured and no agent tools asked for, neither is
+    # on this machine's path, so there is nothing to sign in to (C091 Move 1).
+    if (-not $script:GitHubNeeded) {
+        Write-Skip "Not needed - the Dashboard comes from $($script:DownloadBase) and brings its plugin with it."
+        Write-Skip 'Pass -WithAgentTools if you run agents in containers; that path needs a GitHub sign-in for the GHCR grant.'
+        Set-StageResult 'GitHub sign-in' 'skipped (not needed on the public download path)'
+        return $false
+    }
+
+    if (-not $script:UsePublicDownload) {
+        Write-Step 'No public download host is configured, so the Dashboard comes from the private dist release - this sign-in is what unlocks it.'
+    }
+
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         Write-Warn2 'gh is not available - complete stage 1 first (new window if it was just installed).'
         Set-StageResult 'GitHub sign-in' 'skipped (gh missing)'
@@ -1014,7 +1274,7 @@ function Invoke-StageGitHubAuth {
             $choice = Read-Choice -Prompt 'Try again or continue without GitHub? (t=try again, c=continue)' -Options 't','c' -Default 'c'
             if ($choice -eq 'c') {
                 Write-Warn2 'Continuing without GitHub - the plugin and Dashboard stages will print manual instructions instead of installing.'
-                Set-StageResult 'GitHub sign-in' 'failed'
+                Set-StageResult 'GitHub sign-in' 'failed' -Failed
                 return $false
             }
             $attempts = 0
@@ -1110,6 +1370,18 @@ function Invoke-StagePlugin {
     param([bool]$GitHubOk)
     Write-Section 'Stage 3 of 6 - Polaris plugin'
 
+    # Registering the dist marketplace is a git clone of a PRIVATE repo, so it
+    # needs GitHub credentials this run does not have. It also has nothing left
+    # to do: the Setup package downloaded in stage 4 carries the built plugin
+    # and the Dashboard's Setup Doctor registers it from disk on first run
+    # (C091 Move 1 step 3, ADR 044).
+    if (-not $script:GitHubNeeded) {
+        Write-Skip 'Skipped - the installed Dashboard bundles the Polaris plugin.'
+        Write-Skip 'Its Setup Doctor registers the bundled marketplace on first run; no GitHub credentials are involved.'
+        Set-StageResult 'Polaris plugin' 'skipped (bundled with the Dashboard)'
+        return
+    }
+
     if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
         Write-Warn2 'claude is not available in this window - open a NEW window after stage 1 and re-run, or install inside Claude Code:'
         Write-Host  "      /plugin marketplace add $DistRepoUrl"
@@ -1145,7 +1417,7 @@ function Invoke-StagePlugin {
     } else {
         Write-Warn2 "claude plugin marketplace add failed: $($add.Output.Trim())"
         Write-Warn2 "Most common cause: no Read access to $DistRepo yet (stage 2 prints how to get it)."
-        Set-StageResult 'Polaris plugin' 'failed (marketplace add)'
+        Set-StageResult 'Polaris plugin' 'failed (marketplace add)' -Failed
         return
     }
 
@@ -1158,7 +1430,7 @@ function Invoke-StagePlugin {
     } else {
         Write-Warn2 "claude plugin install failed: $($install.Output.Trim())"
         Write-Warn2 'Run it inside Claude Code instead: /plugin install polaris'
-        Set-StageResult 'Polaris plugin' 'failed (install)'
+        Set-StageResult 'Polaris plugin' 'failed (install)' -Failed
         return
     }
     Set-StageResult 'Polaris plugin' 'ok'
@@ -1166,31 +1438,154 @@ function Invoke-StagePlugin {
 
 # --- Stage 4: Dashboard -------------------------------------------------------
 
+# The Velopack per-user install is the only shape this script has produced
+# since v3.0.0. The pre-Velopack copy-EXE layout (a plain EXE moved into
+# %LOCALAPPDATA%\PolarisAI\Dashboard plus a hand-made desktop shortcut) was
+# removed with C091 Move 1: no release since then carries a plain EXE asset, so
+# both the fallback install and its detection were dead code.
 function Get-InstalledDashboardVersion {
-    foreach ($exe in @($VelopackExePath, (Join-Path $LegacyInstallDir $LegacyExeName))) {
-        if (-not (Test-Path $exe)) { continue }
-        try {
-            $version = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion
-            if ($version) { return [pscustomobject]@{ Path = $exe; Version = ($version -split '\+')[0].Trim() } }
-        } catch { }
-        return [pscustomobject]@{ Path = $exe; Version = $null }
+    $exe = $VelopackExePath
+    if (-not (Test-Path $exe)) { return $null }
+    try {
+        $version = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion
+        if ($version) { return [pscustomobject]@{ Path = $exe; Version = ($version -split '\+')[0].Trim() } }
+    } catch { }
+    return [pscustomobject]@{ Path = $exe; Version = $null }
+}
+
+# One public GET. -UseBasicParsing because 5.1's default parser wants Internet
+# Explorer's engine, absent on Server Core and disabled on hardened images. TLS
+# 1.2 and the suppressed progress bar are set once at the top of the script.
+function Get-PublicDownloadFile {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $uri = "$($script:DownloadBase)/$Name"
+    Invoke-WebRequest -Uri $uri -OutFile $Destination -UseBasicParsing -ErrorAction Stop
+}
+
+# sha256sum format: "<64 hex>  <name>", optionally with a binary-mode asterisk.
+# Returns $null when the file names no line for $Name.
+function Get-ExpectedSha256 {
+    param(
+        [Parameter(Mandatory)][string]$SumsFile,
+        [Parameter(Mandatory)][string]$Name
+    )
+    foreach ($line in (Get-Content -LiteralPath $SumsFile)) {
+        if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($Name))\s*$") { return $Matches[1].ToLowerInvariant() }
     }
     return $null
 }
 
-function New-DesktopShortcut {
-    param([Parameter(Mandatory)][string]$TargetPath)
+# Authenticode gate, run on both download paths before the installer is ever
+# started. Status Valid alone is not enough - any certificate in any trusted
+# chain satisfies that - so the signer thumbprint is pinned to the one Polaris
+# signs with. Returns $true only when both hold.
+function Test-PolarisSignature {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $signature = $null
     try {
-        $desktop = [Environment]::GetFolderPath('DesktopDirectory')
-        $lnkPath = Join-Path $desktop $ShortcutName
-        $shell = New-Object -ComObject WScript.Shell
-        $shortcut = $shell.CreateShortcut($lnkPath)
-        $shortcut.TargetPath = $TargetPath
-        $shortcut.WorkingDirectory = (Split-Path $TargetPath -Parent)
-        $shortcut.Save()
-        Write-Ok "Desktop shortcut created - $lnkPath"
+        $signature = Get-AuthenticodeSignature -LiteralPath $Path -ErrorAction Stop
     } catch {
-        Write-Warn2 "Could not create the desktop shortcut: $($_.Exception.Message)"
+        Write-Warn2 "Could not read the Authenticode signature of $Path - $($_.Exception.Message)"
+        return $false
+    }
+    if ($signature.Status -ne 'Valid') {
+        Write-Warn2 "$([System.IO.Path]::GetFileName($Path)) is not validly signed (status: $($signature.Status)) - refusing to run it."
+        return $false
+    }
+    $thumbprint = ''
+    if ($signature.SignerCertificate) { $thumbprint = "$($signature.SignerCertificate.Thumbprint)".Trim() }
+    if ($thumbprint -ne $SigningCertThumbprint) {
+        Write-Warn2 "$([System.IO.Path]::GetFileName($Path)) is signed by an unexpected certificate ($thumbprint) - refusing to run it."
+        Write-Warn2 "Expected the Polaris signing certificate $SigningCertThumbprint. Re-download; if it happens again, report it before running anything."
+        return $false
+    }
+    Write-Ok "Authenticode signature verified (Polaris signing certificate $SigningCertThumbprint)"
+    return $true
+}
+
+# The public route is unauthenticated, so the checksum is the only integrity
+# anchor there is - a missing or mismatched line fails the stage closed. (The
+# Setup package is Authenticode-signed as well; Windows checks that when it
+# runs.)
+function Install-DashboardFromPublicDownload {
+    $installed = Get-InstalledDashboardVersion
+    if ($installed) {
+        $shown = $installed.Version
+        if (-not $shown) { $shown = 'unknown version' }
+        Write-Ok "Dashboard $shown is already installed - $($installed.Path)"
+        Write-Skip 'The public download route carries no version index, so this stage does not re-download it. The Dashboard updates itself through its Update Center.'
+        Set-StageResult 'Dashboard' 'ok (already installed)'
+        return
+    }
+
+    if ($DryRun) {
+        Write-Plan "GET $($script:DownloadBase)/$PublicSumsName            (checksums, no authentication)"
+        Write-Plan "GET $($script:DownloadBase)/$PublicSetupAssetName   (signed Setup package)"
+        Write-Plan "Would verify its SHA-256 against the $PublicSumsName line and abort on a mismatch."
+        Write-Plan "Would verify its Authenticode signature against thumbprint $SigningCertThumbprint and abort on a mismatch."
+        Write-Plan "Setup would then run per-user and silent ($SetupSilentArg), and the install would be probed at $VelopackExePath."
+        Set-StageResult 'Dashboard' 'dry-run (public download)'
+        return
+    }
+
+    $tempDir = Join-Path $env:TEMP ("polaris-install-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    try {
+        $sumsFile = Join-Path $tempDir $PublicSumsName
+        $setupFile = Join-Path $tempDir $PublicSetupAssetName
+        try {
+            Write-Step "Downloading $PublicSumsName from $($script:DownloadBase)"
+            Get-PublicDownloadFile -Name $PublicSumsName -Destination $sumsFile
+            Write-Step "Downloading $PublicSetupAssetName from $($script:DownloadBase)"
+            Get-PublicDownloadFile -Name $PublicSetupAssetName -Destination $setupFile
+        } catch {
+            Write-Warn2 "Download failed: $($_.Exception.Message)"
+            Write-Warn2 "Check the host in -DownloadBaseUrl (currently $($script:DownloadBase)) and your network, then re-run."
+            Set-StageResult 'Dashboard' 'failed (download)' -Failed
+            return
+        }
+
+        $expected = Get-ExpectedSha256 -SumsFile $sumsFile -Name $PublicSetupAssetName
+        if (-not $expected) {
+            Write-Warn2 "$PublicSumsName names no line for $PublicSetupAssetName - refusing to run an unverified installer."
+            Set-StageResult 'Dashboard' 'failed (no checksum line)' -Failed
+            return
+        }
+        $actual = (Get-FileHash -LiteralPath $setupFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+            Write-Warn2 "$PublicSetupAssetName does not match $PublicSumsName - aborting. Re-run to retry."
+            Set-StageResult 'Dashboard' 'failed (checksum mismatch)' -Failed
+            return
+        }
+        Write-Ok 'SHA-256 checksum verified'
+
+        if (-not (Test-PolarisSignature -Path $setupFile)) {
+            Set-StageResult 'Dashboard' 'failed (signature check)' -Failed
+            return
+        }
+
+        Write-Step "Running $PublicSetupAssetName (per-user, silent - no admin prompt)"
+        $proc = Start-Process -FilePath $setupFile -ArgumentList $SetupSilentArg -Wait -PassThru
+        if ($proc.ExitCode -ne 0) {
+            Write-Warn2 "Setup exited with $($proc.ExitCode) - re-run it manually from $setupFile to see its output."
+            Set-StageResult 'Dashboard' "failed (Setup exit $($proc.ExitCode))" -Failed
+            return
+        }
+        # Never trust an installer exit code: probe what it was supposed to put
+        # on disk (C091 section 3.2 point 4).
+        if (-not (Test-Path -LiteralPath $VelopackExePath)) {
+            Write-Warn2 "Setup reported success but $VelopackExePath is not there - re-run it manually from $setupFile."
+            Set-StageResult 'Dashboard' 'failed (nothing installed)' -Failed
+            return
+        }
+        Write-Ok 'Dashboard installed (Apps & Features: Polaris AI Dashboard)'
+        Set-StageResult 'Dashboard' 'ok (public download)'
+    } finally {
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1203,6 +1598,15 @@ function Invoke-StageDashboard {
         Set-StageResult 'Dashboard' 'skipped'
         return
     }
+
+    # Public host configured: no GitHub anywhere on this path.
+    if ($script:UsePublicDownload) {
+        Install-DashboardFromPublicDownload
+        return
+    }
+
+    # No public host yet - today's path, unchanged: the signed Setup package
+    # comes from the private dist repo's latest release through gh.
     if (-not $GitHubOk -or -not (Get-Command gh -ErrorAction SilentlyContinue)) {
         Write-Warn2 'GitHub sign-in did not complete - the Dashboard release lives in the private dist repo.'
         Write-Warn2 'After fixing the sign-in, re-run this script (or, with the plugin installed, run /polaris:update-dashboard --apply inside Claude Code).'
@@ -1215,7 +1619,7 @@ function Invoke-StageDashboard {
     $latestTag = $latest.Output.Trim()
     if ($latest.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($latestTag)) {
         Write-Warn2 "Could not read the latest release of $DistRepo - check access (stage 2) and network, then re-run."
-        Set-StageResult 'Dashboard' 'failed (release lookup)'
+        Set-StageResult 'Dashboard' 'failed (release lookup)' -Failed
         return
     }
     $latestVersion = $latestTag.TrimStart('v')
@@ -1234,70 +1638,48 @@ function Invoke-StageDashboard {
     }
 
     if ($DryRun) {
-        Write-Plan "gh release download $latestTag --repo $DistRepo -p '$SetupAssetPattern'  (Setup package, preferred)"
-        Write-Plan "Setup would run per-user and silent ($SetupSilentArg)."
-        Write-Plan "Fallback for releases without a Setup package: gh release download -p '$LegacyExeName' to $LegacyInstallDir + desktop shortcut."
-        Set-StageResult 'Dashboard' 'dry-run'
+        Write-Plan "gh release download $latestTag --repo $DistRepo -p '$SetupAssetPattern'  (signed Setup package)"
+        Write-Plan "Would verify its Authenticode signature against thumbprint $SigningCertThumbprint and abort on a mismatch."
+        Write-Plan "Setup would then run per-user and silent ($SetupSilentArg), and the install would be probed at $VelopackExePath."
+        Set-StageResult 'Dashboard' 'dry-run (private dist release)'
         return
     }
 
     $tempDir = Join-Path $env:TEMP ("polaris-install-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
     try {
-        # Preferred path: the Velopack Setup package (per-user install with an
-        # Apps & Features entry, uninstaller, and in-app delta updates).
+        # The Velopack Setup package: per-user install with an Apps & Features
+        # entry, an uninstaller, and in-app delta updates.
         Write-Step "Downloading the Setup package from $latestTag"
         $dl = Invoke-Native -Exe 'gh' -Arguments @('release', 'download', $latestTag, '--repo', $DistRepo, '-p', $SetupAssetPattern, '-D', $tempDir)
         $setupExe = Get-ChildItem -Path $tempDir -Filter '*Setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($setupExe) {
-            Write-Step "Running $($setupExe.Name) (per-user, silent - no admin prompt)"
-            $proc = Start-Process -FilePath $setupExe.FullName -ArgumentList $SetupSilentArg -Wait -PassThru
-            if ($proc.ExitCode -eq 0) {
-                Write-Ok 'Dashboard installed (Apps & Features: Polaris AI Dashboard)'
-                Set-StageResult 'Dashboard' 'ok (Setup package)'
-            } else {
-                Write-Warn2 "Setup exited with $($proc.ExitCode) - re-run it manually from $($setupExe.FullName) to see its output."
-                Set-StageResult 'Dashboard' "failed (Setup exit $($proc.ExitCode))"
-            }
+        if (-not $setupExe) {
+            Write-Warn2 "No Setup package on $latestTag - $($dl.Output.Trim())"
+            Set-StageResult 'Dashboard' 'failed (no Setup package)' -Failed
             return
         }
 
-        # Fallback: releases that predate the Setup package ship a plain EXE.
-        Write-Skip "No Setup package on $latestTag - falling back to the plain-EXE install"
-        $dl = Invoke-Native -Exe 'gh' -Arguments @('release', 'download', $latestTag, '--repo', $DistRepo, '-p', $LegacyExeName, '-D', $tempDir)
-        $plainExe = Join-Path $tempDir $LegacyExeName
-        if ($dl.ExitCode -ne 0 -or -not (Test-Path $plainExe)) {
-            Write-Warn2 "Could not download $LegacyExeName from $latestTag - $($dl.Output.Trim())"
-            Set-StageResult 'Dashboard' 'failed (download)'
+        if (-not (Test-PolarisSignature -Path $setupExe.FullName)) {
+            Set-StageResult 'Dashboard' 'failed (signature check)' -Failed
             return
         }
 
-        # Best-effort integrity check against the release's SHA256SUMS.
-        $sums = Invoke-Native -Exe 'gh' -Arguments @('release', 'download', $latestTag, '--repo', $DistRepo, '-p', 'SHA256SUMS', '-D', $tempDir)
-        $sumsFile = Join-Path $tempDir 'SHA256SUMS'
-        if ($sums.ExitCode -eq 0 -and (Test-Path $sumsFile)) {
-            $expected = $null
-            foreach ($line in (Get-Content $sumsFile)) {
-                if ($line -match "^([0-9a-f]{64})\s+\*?$([regex]::Escape($LegacyExeName))\s*$") { $expected = $Matches[1]; break }
-            }
-            if ($expected) {
-                $actual = (Get-FileHash -LiteralPath $plainExe -Algorithm SHA256).Hash.ToLowerInvariant()
-                if ($actual -ne $expected) {
-                    Write-Warn2 'Downloaded EXE does not match SHA256SUMS - aborting the Dashboard install. Re-run to retry.'
-                    Set-StageResult 'Dashboard' 'failed (checksum mismatch)'
-                    return
-                }
-                Write-Ok 'SHA256 checksum verified'
-            }
+        Write-Step "Running $($setupExe.Name) (per-user, silent - no admin prompt)"
+        $proc = Start-Process -FilePath $setupExe.FullName -ArgumentList $SetupSilentArg -Wait -PassThru
+        if ($proc.ExitCode -ne 0) {
+            Write-Warn2 "Setup exited with $($proc.ExitCode) - re-run it manually from $($setupExe.FullName) to see its output."
+            Set-StageResult 'Dashboard' "failed (Setup exit $($proc.ExitCode))" -Failed
+            return
         }
-
-        New-Item -ItemType Directory -Path $LegacyInstallDir -Force | Out-Null
-        $finalPath = Join-Path $LegacyInstallDir $LegacyExeName
-        Move-Item -LiteralPath $plainExe -Destination $finalPath -Force
-        Write-Ok "Dashboard installed - $finalPath"
-        New-DesktopShortcut -TargetPath $finalPath
-        Write-Skip 'Agent host not installed on this path - the Dashboard repairs it on demand (or run /polaris:update-dashboard --apply).'
-        Set-StageResult 'Dashboard' 'ok (plain EXE)'
+        # Never trust an installer exit code: probe what it was supposed to put
+        # on disk (C091 section 3.2 point 4).
+        if (-not (Test-Path -LiteralPath $VelopackExePath)) {
+            Write-Warn2 "Setup reported success but $VelopackExePath is not there - re-run it manually from $($setupExe.FullName)."
+            Set-StageResult 'Dashboard' 'failed (nothing installed)' -Failed
+            return
+        }
+        Write-Ok 'Dashboard installed (Apps & Features: Polaris AI Dashboard)'
+        Set-StageResult 'Dashboard' 'ok (private dist release)'
     } finally {
         Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -1379,6 +1761,21 @@ function Invoke-StageFinish {
 
     $script:StageResults | Format-Table -AutoSize | Out-Host
 
+    # Why the run looked the way it did. The table above says WHICH stages were
+    # skipped; these two lines say why, so nobody reads a skip as a failure.
+    if ($script:UsePublicDownload) {
+        Write-Ok "Dashboard source: the public download route $($script:DownloadBase) - no GitHub identity was used for it."
+    } else {
+        Write-Ok "Dashboard source: the private dist release $DistRepo - that is what stage 2's GitHub sign-in unlocks."
+        Write-Skip 'Configure a public download host ($DefaultDownloadBaseUrl, or -DownloadBaseUrl) to take GitHub off this path.'
+    }
+    if ($script:AgentTools) {
+        Write-Ok 'Agent tools requested (-WithAgentTools / -IncludeDocker) - the GitHub CLI and its GHCR sign-in are part of this install.'
+    }
+    if (-not $script:GitHubNeeded) {
+        Write-Skip 'Stages 2 and 3 were skipped: nothing on this path needs GitHub, and the Dashboard registers its bundled plugin itself on first run.'
+    }
+
     $installed = Get-InstalledDashboardVersion
     if ($installed) {
         Write-Host  '    Open the Polaris Dashboard to continue.'
@@ -1428,8 +1825,20 @@ $modeSuffix = ''
 if ($DryRun) { $modeSuffix = ' (dry run - nothing will be changed)' }
 Write-Host ''
 Write-Host "Polaris AI installer $script:BootstrapVersion$modeSuffix" -ForegroundColor Cyan
+Write-Host 'The developer and CI path. Everyone else: get the front-door installer from the Polaris'
+Write-Host 'download page and double-click it - no terminal, no GitHub account, no sign-in.'
 Write-Host 'Six stages: prerequisites, GitHub sign-in, plugin, Dashboard, Claude sign-in, finish.'
 Write-Host 'Idempotent - re-running skips whatever is already done.'
+if ($script:UsePublicDownload) {
+    $publicNote = "Dashboard source: $($script:DownloadBase) (public download"
+    if (-not $script:GitHubNeeded) { $publicNote += '; stages 2 and 3 are skipped' }
+    Write-Host "$publicNote)."
+} else {
+    Write-Host "Dashboard source: the private $DistRepo release (GitHub sign-in required)."
+}
+if ($script:AgentTools) {
+    Write-Host 'Agent tools requested: the GitHub CLI and the GHCR sign-in are included.'
+}
 
 Invoke-StagePrerequisites
 $gitHubOk = Invoke-StageGitHubAuth
@@ -1444,11 +1853,26 @@ if ($SkipAnthropicSignIn) {
 }
 Invoke-StageFinish
 
+# Exit code, after the summary so a human still sees the whole picture. Until
+# now the only fatal outcome was the stage-1 `throw`, so a wrapper script saw
+# exit 0 after a checksum mismatch with nothing installed.
+#
+# `exit` is guarded on $PSCommandPath on purpose: it is set when the script runs
+# as a FILE (powershell -File install.ps1, which is what CI and IT use) and
+# empty under `irm | iex`, where Invoke-Expression runs in the caller's own
+# runspace and `exit` would close their console window. A dry run is never a
+# failure, whatever it found.
+if ($script:FailedStages.Count -gt 0) {
+    Write-Host ''
+    Write-Warn2 "Finished with failures: $($script:FailedStages -join ', '). Nothing above was silently ignored - re-run after fixing them."
+    if (-not $DryRun -and -not [string]::IsNullOrEmpty($PSCommandPath)) { exit 1 }
+}
+
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCWglNXsAy+MTpc
-# I23l4K7RLeu0qlblWw6YYnGj+AdBtqCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCrdKbFoKwG1f3B
+# 5zNmUKi8/9gES7nwB1q31ESh56GOaqCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1522,20 +1946,20 @@ Invoke-StageFinish
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIGbLmPjnQzC+
-# Iu8K4U2L1rt2fu40jS1aWUwE8R/1x2y5MA0GCSqGSIb3DQEBAQUABIIBgHYoCxuT
-# PpMCFENyDdg1JzZorf9hpUR6EljLauleX1nMpEVxW+xUL0+j0KzaHbFeKzlKkIPo
-# IJ2d3V5PVTTNk7tRsk31Sh9dQQqDAtJ4bST8LnMYB4E4dLTOjmjEnygOTT95tVmH
-# do1zf+53gz26LDu6Z7UCXg9s/FTnSZyS7HTLapI3qCjSSXhPHmU2V8MLzjT7chA5
-# 5HPBCowq0mloHtNkc+Ii2MRC+cvarZ17e6kMQ1gvE1wwOAj/jHJF4s2ZpVEoMaEq
-# lfIhAM5QRNU96gEzHJx38EJdLiboSZdefiLG4lCszrb4BTuk3uUaMQyV56kBD3HF
-# LR7H1zOMr+5XZBc3GYI3cJ4IFMbCATRqCO026KEvT4/2+/1k30PoJ2ITMANWh53f
-# DaV8/nKrzLjiQwT/XTC6UFQSLu6wVW++w/FOTCgfGjFPxIKwEcnXF1lcPfVmlwWX
-# X093NDTbVgjYAAIc0gmwX+e4KUb7QNNeThrlOHD1zLtEZBrlfEbgbLju4qGCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIBtGxZD3ST5s
+# cIp/pj8g00JFGb9pCEe/1e7NFEh06G1oMA0GCSqGSIb3DQEBAQUABIIBgInhYGpn
+# U8hp5gE9ft3GmCLUqjvv9F8rq7mQ1yL1oCiTT7+zy/LgVy/4nuBRCG/WsKIe50EB
+# YjyDUIXpXlnmRoYSxOJVi95x9LNOB5+xuxvMUJ23qmtweKhfg7+S2TtKjzoWYd5L
+# tlJ2kuTDAD00idlvKbQ05EJxX3H7j59nzpXXyT6BGQKITaoelSF6mhtRUMC/wYzk
+# P1vmvQLrn/YRZ3KtgfLUvZDDWXfpAWFFS2o+aEU5USKlwyXY102PWu9NDwX10Unl
+# i59UgaPT7PpEWWazN7UfPGFtZgx3F7pTZCREh1B/j+m1RiZWJ/zarnkz785Qkfo/
+# 5hTsE0pm9g5kwe+O9C9HOOb/C3w5CJVZCFuYv6MlSoHJxbCke3vZTK87wBVPERID
+# wr1GRmSfbocDJp7OBEuv31527wLO61oTcZHg728Ohw0gniiGP3oF61InW4YK3omo
+# 1BwU6LL9dojbP+dn1yqdSgsWzhRUr08fzyyg4LJwznAWxW1gYrkpztqa8KGCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQgFGs1Fc6JSlG3U0PZI8pJsAdzWEC7S/qj
-# +F1EinYcrXQCBwqofHBoNc0YDzIwMjYwOTAxMTQyMTIyWjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgML2pjgUElSqgHhYhh9He6lGiMc74FHsH
+# 78JF4HaTNEoCBwqofHDF1o4YDzIwMjYwOTA0MTI0MDE3WjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -1643,22 +2067,22 @@ Invoke-StageFinish
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA5MDExNDIxMjJaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDA1
-# uyTc7ANZ3jeYK1PEdndDwGG5vWoSF5jeRFeYM7r+AI2GTqV8rCSuGs0/JT3kr3Iw
+# DQEJBTEPFw0yNjA5MDQxMjQwMTdaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDC2
+# +Z3xRmxsqBu2ZcbczFMKRHnAZEzVIJ3/IK5rTUJDHvP1d499Iodr6194DmCQlB8w
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAtH5G6VV3AiVwkVlO
-# Nw5AQjt0YHppMj6INtyZWP5M0PWi9ffquvmzV8gu6/1r0t18q2ZulRHa6dWfdubV
-# 7fHnH5QskyfjtPHuc+j1/AciWe50CF9/BxVIPR2H4326KFzJ/hVvcubA0qALdiEX
-# dsC4x7KswqO+UiFY4dfZ8p115EMjt6ZlE9oOWFBcIAGwpv3hoj7IA6G2Wnz2kSW/
-# f49dYbkCurg42ZtHFABRgZera08YDj7zXV6JEsJ9KnEV+8Z+gejvJC1tCeKQyUv1
-# JaVuNqZRQcb/HKugwuVCEOsAnITe2m9/qDeGrbkTVnMf/y5ixrOSQyDog6U1wae+
-# FgTTZMqoJvbcovdpCbtlpGLKXdOpLzVdZ9/FUapKJp7fKK3MmAcsIseXyzE9raR7
-# JoRNdD8xcUPx4DqBKCZ3qE2ehqPiOFQyorZx38vMPawtiTV9mKXWX7cl1fsgZcyr
-# cOHl+kRyKkMYQkC1lZaTjTKs8zh1XGmK8+1lplFYx+d4X7m0e3bCRMxBe2oSxd9j
-# fOLvDMNVvZAW4YXnKzFJ/mmP8yyyk8rdrySt89yVyEQDqRpSvzxgEOosGwumEJSe
-# CxdBz97qRBdBcCMyGzN1hbg8zePAWupCeHAB3SZ75mb8Hqb6lK0eORxm4ojKvDrP
-# fx2qieYDweQ6j6HAUZLrQ/L/QYo=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAmeHJ1fWciRtVxcAd
+# x9qzDjUT4o2+Q9ko+F1cXX+nc78LrCcCkSP7H3aDQ9pizMo+smZRHTasqlfhLTBw
+# +EOdgAVVwAqBOUdn+hierbM9a1KNv3qRrTy1dSeVPCnuh26sJ/cTC94jrEfjEkYT
+# S8pLwZPCdEwgd9+KfjqTfyXeKAPrc/2zNBsQugXt0yms7Ly9iholN6H41PL6HH10
+# RnFfctLOw1r7myOYMZWAXSLsOLLtZjTCKsyzcYpMxjrIReFolO0YXf16rC7xho7G
+# oMz1eHdLa8x2tZ4NgOdca6YStEgbLIuy65odVgej9cT9csaIjrr0z77kBazGjVGV
+# q6hCn+G2H4db2o/0o3RapzMHyFTWrMT0rQRzC/YPcCs8n+0RY8dOwDqpp/NC7ZKK
+# BvvEUka6s73g2F7y8LzTzCkOPRlFdC6TwSVmXfoamwJa7t2tUiGQJLhc+we8ydEG
+# Hv0ye9LH8ecae+nNCDq3UrJt+F1tYXPUxoWudEjYrky/5qgtO781XzmzAychotue
+# 55hblA8a1ZqmVUrr/ch2PkEDu/a7jYxa4eiZrAodku0c2lq+QtsG+08JHZTxzx2G
+# Oo5D6AmuKcVXUDrJGU1Y7T9aixbDiNmnfyk5vavq7xV5TaziTUSJS/5Qwtrha881
+# SMwcrCl0mG5A62MwI+jBz/exAD4=
 # SIG # End signature block
