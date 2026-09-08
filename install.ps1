@@ -123,11 +123,10 @@
 
 .PARAMETER DownloadBaseUrl
     Public download route to fetch the Dashboard Setup package from, i.e.
-    https://polaris.chrisnowottny.com/download (no trailing slash), which is
-    live after the Cloudflare setup in docs/r2-release-hosting.md; until then
-    the GitHub release remains the source. Overrides the
-    $DefaultDownloadBaseUrl constant in the script. Setting it takes GitHub off
-    this run entirely unless -WithAgentTools is also passed.
+    https://polaris.chrisnowottny.com/download (no trailing slash). Overrides
+    the $DefaultDownloadBaseUrl constant, which already carries that host, so
+    this is only needed to point a one-off run somewhere else. Setting it takes
+    GitHub off this run entirely unless -WithAgentTools is also passed.
 
 .PARAMETER SkipClaudeCode
     Do not install Claude Code even if it is missing (just report it).
@@ -198,7 +197,7 @@ Enable-Tls12
 $ProgressPreference = 'SilentlyContinue'
 
 # Stamped by the release pipeline; 'dev' when run from a working tree.
-$script:BootstrapVersion = '3.9.2'
+$script:BootstrapVersion = '3.9.3'
 
 # --- Constants ----------------------------------------------------------------
 
@@ -233,16 +232,15 @@ $SigningCertThumbprint = 'D8ED4F2FC356A149FEB96D387A313DD6C0071978'
 # The intended value is https://polaris.chrisnowottny.com/download (no trailing
 # slash), the custom domain ADR 044 item 12 settles.
 #
-# EMPTY IS THE SHIPPED DEFAULT and it stays empty on purpose: that host does not
-# answer yet, and a non-empty value here would make every run download from a
-# host that is not there. While it is empty this script behaves exactly as it
-# always did - stage 4 downloads from the private dist release with `gh`, and
-# stages 2 and 3 run. Fill it in only when BOTH are true: the Cloudflare setup in
-# docs/r2-release-hosting.md has been done (bucket, Worker, the DNS move and the
-# custom domain), and the transition release has been published to R2 so the
-# artifacts the script asks for are actually under /download. Until then, pass
-# -DownloadBaseUrl for a one-off run against the *.workers.dev stopgap.
-$DefaultDownloadBaseUrl = ''
+# FILLED IN FOR THE TRANSITION RELEASE. Both preconditions the empty default was
+# waiting on are met: the Cloudflare setup in docs/r2-release-hosting.md is done
+# (bucket, Worker, the DNS move and the custom domain), and the transition
+# release uploads the artifacts this script asks for to /download in the same run
+# that publishes this script - R2 first, get-polaris last - so the host answers
+# for them by the time anyone can fetch this copy. Stage 4 now downloads over
+# plain HTTPS with no GitHub identity, and stages 2 and 3 drop out. Pass
+# -DownloadBaseUrl to point a one-off run somewhere else.
+$DefaultDownloadBaseUrl = 'https://polaris.chrisnowottny.com/download'
 
 # Public artifact names, as pack-sign-publish.ps1 writes them into SHA256SUMS.
 # Fixed, not patterns: an unauthenticated GET needs an exact key, and the
@@ -1871,8 +1869,8 @@ if ($script:FailedStages.Count -gt 0) {
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDHXDwOW7W6kiNu
-# ncOh1jbScAbilrKyfYMStRi9egTcD6CCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBTjDE5SwVN3v92
+# oQcwsyO1MgoAytxDVREQgz/jR53vlaCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1946,20 +1944,20 @@ if ($script:FailedStages.Count -gt 0) {
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIOnrL49Ze6IZ
-# QMvnXtnz6E4lMx9ryjsBvkmmVAwcQwsiMA0GCSqGSIb3DQEBAQUABIIBgEGTJ0/0
-# CEU/6fcW5mBA30FpfS5SZekhjSQu/R8tzvw32VXmYRm5nhcDaWc9qzMI5i9vH7At
-# 8mW8mnPeP13FRIlyXybKCpCOVfR7vgYDM2m0p0ACln/janqDh0El189R0GTC4H6G
-# jYkiZ4wpnH+fRlJLaDj+JRbjkJPuJSxUlvxJ5CeKc4rjw4U/6Jgv2wSinyoptLZI
-# F0SAz8X+lUNPnB1OOky+lPSEf/jSeilLL2sSf/pUcCi38gimG4sHNQYpgMbJIiCg
-# +jWbfXKXf6+UUIrx/zKznQhBKQBLwVPq6DKVloP4XcQUUjkRa1Asggx0cuo4TySS
-# qU/o2K8AHf7tmj6MXsaDln4VQIaWMZfWzsakzYYnLbPtGuownfgi5p7jU68or8wI
-# fuRmG0zMuCUel8JFqO9+dtZEuVTWXoZPvgxZLnhDWma0sk6N03wZu1glIQlIW0yL
-# nSuRt2QasvXw8dqvsS27jkLUH/veieSHGw4ts/0sbqXvzYiWp7f1htYfvqGCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEILB0B+zs1BzI
+# vVFk8qSagcn3aZ+t8XxZUMw806SYJJYhMA0GCSqGSIb3DQEBAQUABIIBgEWG1IMF
+# aCK+g3ScJ/PIMUFQ3KRqviM+E7D+RHhZ0BQtOtIEp2txsoX6UmBXu4SW/RIpewEn
+# 3uNdA5JMlE/cTJR0GdHqgt2016p7Ug/N8ez7jNmjPTp7i1FXcvTHDHwHBuqeYTgK
+# v8wOiWX0sVMbBFxjt25Q2f5VgUTagRU+zvf83csawcZ0dYiZQNc98iwaDRYSA1dr
+# HXa4dC5NNtqIwWuhy7I6r5P6c4UIvCoYFT8EWGW+ah+l+d1VUehYOz/sJ3MfyEP6
+# wxIqHYcZKCVHCviq8lmlVxb1+25FLj/5oUNUNbwKK8DXmh2RvIV/uUBXPcnm0C7O
+# UfQDihiDN/n7pviUEPBwWM303eYCCEMa5gAs0zhnWGdnDiXDza/5FZhxgUp7rrgD
+# H7IE31xkE1CWhN/nvqw7hpnrevTaVV7z/BOgUi6xP5D0AwtN7VovH5z+xcfboJqj
+# 2dvmUZEvfoFNPoKqv+FjFwCqObJIS5jYgqmkwlDsveUn8YkJM5g6lAeCEaGCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQg6nfREX3qsi9MYuHYQgqVSt86/gW1Brm8
-# WoK2JCzaONQCBwqofHDHpXsYDzIwMjYwOTA2MTg1NTE3WjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgeSiA2BnkiMVknHvcJ+OUpp2Xqxbrdfsy
+# Mmm1Zi4JGoICBwqofHEHNvYYDzIwMjYwOTA4MTQxNjA2WjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -2067,22 +2065,22 @@ if ($script:FailedStages.Count -gt 0) {
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA5MDYxODU1MTdaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDAs
-# CloGw6HyTFgs36DNx+PaE2MtYAsIdAgnuXBz1kWMC5zCUPJ0NssVlopCr7w1KKQw
+# DQEJBTEPFw0yNjA5MDgxNDE2MDZaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDDi
+# u0diBJUQjSo4p9xuhpe8acOvG47orMsSTNn9cd+jmo0VLcKIztH1CyLG6+wytIww
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAbZOavRTY5tzfIJYn
-# fKNcvZHBoRXp9+a1kzQd1mhjoZg7n+HC9ROQi/lmSdVOf1X22DRqnbSq+t9oAGmb
-# o33H/qiM7nOnJqpXCuC0Y8iBkWiVqzE/peDVEqqnaNTkEoKtg2I0VJXYc9mdQxup
-# Pz/RI7HG/vHV8Ohqfoy79Kw4MijFVWw177cqrF2oA2B8qdmNavLEQAJbhZQ9B4ni
-# ynDENPUCSwZmLAz7dkwvkp27Q51cAjGN9cmU6qDXuyN4VPxVU7e+U1ySj8FxOrex
-# RyNrepvwno+vPoM+pPmzbAfkZeaOQhqKXNQj2HsZzPUaY/UZHUfPyEuTimYGtmN0
-# d2AJ09a2caQYc9OnjH9ITFQi0bmemLk2hr3l4DcQxfRzTHQGD+lr8Uw8WgMDq3D9
-# p+Xd6Cwf2BNE2wCaGGeFlSxmC3Iim/ynVJn4EyKXECq0LrXpfzpAnHE7QscmRHpB
-# GwvEd8IBidiqJ9O2vIfxpyID1q9P1g3xGFBLaYxoTrCBo5byMuF/x6BCoGfY055p
-# WekNZPHz/cW7Do92zNq/lviOb0/HHIPLrVHrMBvdbQCZ8qAtxZBOa9PYVabsZBFb
-# oXw3vMPPBgB2QQCWH3hfAxU/Dkdum+0Qa3ww3l3pMqXagte4yiNoLxoYTfnDlG4+
-# BAzL+bzFvn0CQPKghNA4m0B9GYo=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAPpVP/UAqegEls0il
+# 3roSkexFFI6I1TtohspBgRyOT7HicZKTe6/U8qOma7IcdjoDisP76VuslYfhjhrE
+# Ulaerpe2dHuzBLnXIPefaP/qxOJlRQcN7zQSdEDVlJdEVBRcO1Zt9hLYkLX/AQWz
+# zO97CEuuPKuTyakE1NIr1UNdjRQeT5lMrZ5WdJ6oUuqE0STfGdRPG60KJVgbBn47
+# eUx1PHoWd87MYIusnCapHkV6oMTedbBKPLYT14oIp3jFk9+wQkHazipXsdKYZqQm
+# zfFsyHPEMijLRdauMKqOEEf+5HJCmyVtj7Me3UnpghX5smW7E3WxyylLfFzbQrLs
+# 2Rj8K1kz/x6ZCjL+gTfFvUjLYv8ISq82jGbpDSlHuFtQU7UMUbAPek9KixTcDvnR
+# +92WtZXXAGAeF0H2zwR/ugiWm/uKMwG148pKJsNwjsElte/uOjjyStRfOh++l4ME
+# jXGpHRzHzfIVlxregbpy5OK1dDY0dGLtgzo80c5NeVbPuwc1O29iMbGzyUGrb6sE
+# 3pV1mGYWkAtCCkFej/i0KvRMfhS5nZ57TyHfr+dEcO5S8pKLR0CsiekwGWRYyjke
+# 4qTglZsCqtQYgBYF23rYockeWbU08GFlqUsN3yDaGb/BR2jBNEWaiyb0KIpIuAf9
+# 5ED/TVZ2ihTTAZ+R5n65VFJd5Kg=
 # SIG # End signature block

@@ -14,9 +14,8 @@ Download **`PolarisAI-Setup.exe`** from the Polaris AI download page and double-
 no terminal, no GitHub account and no sign-in, it installs per-user, and the only elevation prompt
 you may see is Git for Windows installing itself.
 
-> **Download page**: `https://polaris.chrisnowottny.com/download/` - live after the Cloudflare
-> setup; until then the GitHub release remains the source, so ask the maintainer for the installer
-> directly.
+> **Download page**: `https://polaris.chrisnowottny.com/download/` - public but unlisted, so the
+> URL reaches you by email rather than from a search engine.
 
 The same page carries the portable zip and a machine-wide `.msi` for IT deployment. Everything on
 it is Authenticode-signed and covered by a published `SHA256SUMS`.
@@ -37,9 +36,9 @@ Six idempotent stages, safe to re-run at any time:
    CLI comes only with `-WithAgentTools`, Docker Desktop only with `-IncludeDocker`.
 2. **GitHub sign-in** - only for agent/Docker users, or while no public download host is configured.
    One browser device-flow login; the known pitfalls get guided fixes.
-3. **Polaris plugin** - skipped on the public download path, because the installed Dashboard bundles
+3. **Polaris AI plugin** - skipped on the public download path, because the installed Dashboard bundles
    the plugin and registers it on first run.
-4. **Polaris Dashboard** - downloads and runs the signed Setup package, silent and per-user.
+4. **Polaris AI Dashboard** - downloads and runs the signed Setup package, silent and per-user.
 5. **Claude sign-in** - detected and offered, never required to finish the install.
 6. **Finish** - open the Dashboard.
 
@@ -61,7 +60,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -DryRun
 | Switch | Effect |
 |---|---|
 | `-DryRun` | Probe only - print what every stage would do, change nothing |
-| `-DownloadBaseUrl <url>` | Fetch the Dashboard from the public download route, `https://polaris.chrisnowottny.com/download` (live after the Cloudflare setup; until then the GitHub release remains the source). Takes GitHub off the run entirely |
+| `-DownloadBaseUrl <url>` | Fetch the Dashboard from the public download route, `https://polaris.chrisnowottny.com/download`. That is already the script's default, so pass this only to point a run somewhere else. Takes GitHub off the run entirely |
 | `-WithAgentTools` | Install the GitHub CLI and run the GitHub sign-in stage (Docker/agent users only) |
 | `-IncludeDocker` | Also install Docker Desktop and sign it in to the container registry. Implies `-WithAgentTools` |
 | `-SkipClaudeCode` | Do not install Claude Code (report only) |
@@ -70,7 +69,7 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -DryRun
 
 ### Before you run it
 
-- **You need a Polaris licence.** The Dashboard runs, and updates, on a signed licence file the
+- **You need a Polaris AI licence.** The Dashboard runs, and updates, on a signed licence file the
   maintainer issues per firm. Without one it opens on its Setup Doctor and asks for it.
   [Request a licence](#requesting-a-licence) before you install.
 - **You need a Claude account** (Pro, Max or Team) for the Claude Code CLI.
@@ -79,9 +78,10 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -DryRun
 - winget is required for the prerequisite installs (preinstalled on Windows 11; on Windows 10
   install "App Installer" from the Microsoft Store).
 - The Git for Windows install is machine-wide and raises a UAC prompt. Everything else is per-user.
-- **Until the public download host is live**, stage 4 falls back to the private distribution
-  release and needs `gh auth login` plus read access granted by the maintainer. Pass
-  `-DownloadBaseUrl` once the host exists and that requirement disappears.
+- Stage 4 downloads the Setup package from the public host over plain HTTPS, with no GitHub
+  identity. Only an **older** copy of the script - one from before the host became the default -
+  falls back to the private distribution release and needs `gh auth login` plus read access
+  granted by the maintainer.
 
 ## Requesting a licence
 
