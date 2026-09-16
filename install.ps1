@@ -34,18 +34,22 @@
                           offered the switch, never removed). Node.js is
                           DETECTED ONLY and never installed: the Dashboard
                           package brings its own Node runtime. The GitHub CLI
-                          is installed only with -WithAgentTools, Docker
-                          Desktop only with -IncludeDocker. Reports a blocking
-                          execution policy with its fix, verifies Git Bash, and
-                          reports which of the two Windows bash.exe shadows (if
-                          any) sits in front of it on PATH.
-      2. GitHub sign-in - only when GitHub is on this machine's path at all
-                          (-WithAgentTools, or no public download host
-                          configured). One browser device-flow login,
+                          is installed only on the GitHub path (see stage 2),
+                          Docker Desktop only with -IncludeDocker. Reports a
+                          blocking execution policy with its fix, verifies Git
+                          Bash, and reports which of the two Windows bash.exe
+                          shadows (if any) sits in front of it on PATH.
+      2. GitHub sign-in - only when no public download host is configured,
+                          i.e. when the Dashboard still comes from the private
+                          dist release. One browser device-flow login,
                           `gh auth setup-git`, and (when Docker is present)
                           GHCR. Known traps - a shadowing GH_TOKEN, a
                           fine-grained PAT, the WSL bash app execution alias -
-                          get guided fixes with a re-check loop.
+                          get guided fixes with a re-check loop. Container
+                          agents no longer put GitHub on the path (C108): on
+                          the public download path the Dashboard pulls the
+                          agent image from the licensed registry with its
+                          licence, by itself.
       3. Polaris plugin - non-interactive `claude plugin` install from the
                           private dist repo. Skipped on the public download
                           path: the installed Dashboard bundles the plugin and
@@ -96,11 +100,12 @@
       * Permission to approve UAC prompts (the winget installs are
         machine-wide). If you are not a local administrator, your IT has to run
         stage 1.
-      * ONLY on the GitHub path (no download host configured) or with
-        -WithAgentTools: a GitHub account with Read access to
-        polaris-ai-org/PolarisAI-dist (ask the maintainer; you will receive an
-        email invite to accept). Agent users additionally need the GHCR package
-        grant.
+      * ONLY on the GitHub path (no download host configured): a GitHub
+        account with Read access to polaris-ai-org/PolarisAI-dist (ask the
+        maintainer; you will receive an email invite to accept), and, for
+        agents in containers, the GHCR package grant. On the public download
+        path nothing needs a GitHub identity - not even container agents,
+        whose image comes from the licensed registry with the licence (C108).
 
     Run it from a NORMAL PowerShell window - do not "Run as administrator".
     The UAC prompts handle elevation per package; a per-user install done as
@@ -110,23 +115,29 @@
     Probe only - print what every stage would do and change nothing.
 
 .PARAMETER IncludeDocker
-    Also install Docker Desktop and log it in to GHCR. Needed only to run
-    agents in containers; large install, so it is opt-in. Implies
-    -WithAgentTools, because the agent image is pulled from GHCR.
+    Also install Docker Desktop. Needed only to run agents in containers; large
+    install, so it is opt-in. It puts no GitHub identity on the path: on the
+    public download path the Dashboard signs Docker in to the licensed
+    registry with its own licence and pulls the agent image from there (C108).
+    Only on the GitHub path, where the image still comes from GHCR, does the
+    stage-2 sign-in also log Docker in to GHCR.
 
 .PARAMETER WithAgentTools
-    Install the GitHub CLI and run the GitHub sign-in stage. Only Docker/agent
-    users need this: pulling the agent image needs a GHCR grant, and that grant
-    is reached with `gh`. Off by default, which is what takes the third UAC
-    prompt (the GitHub.cli MSI) and the whole GitHub identity off a normal
-    user's path.
+    Accepted for compatibility, and a no-op since C108. It used to install the
+    GitHub CLI and run the GitHub sign-in stage because a container agent's
+    image was pulled from GHCR with a `gh` token. The image now comes from the
+    licensed registry with the Polaris licence, so container agents need no
+    GitHub identity and nothing is installed for them here: pass -IncludeDocker
+    for Docker Desktop. The GitHub CLI and the sign-in stage remain on the
+    GitHub path only (no public download host configured), where they are
+    what unlocks the private dist release.
 
 .PARAMETER DownloadBaseUrl
     Public download route to fetch the Dashboard Setup package from, i.e.
     https://polaris.chrisnowottny.com/download (no trailing slash). Overrides
     the $DefaultDownloadBaseUrl constant, which already carries that host, so
     this is only needed to point a one-off run somewhere else. Setting it takes
-    GitHub off this run entirely unless -WithAgentTools is also passed.
+    GitHub off this run entirely.
 
 .PARAMETER SkipClaudeCode
     Do not install Claude Code even if it is missing (just report it).
@@ -197,7 +208,7 @@ Enable-Tls12
 $ProgressPreference = 'SilentlyContinue'
 
 # Stamped by the release pipeline; 'dev' when run from a working tree.
-$script:BootstrapVersion = '3.11.1'
+$script:BootstrapVersion = '3.12.0'
 
 # --- Constants ----------------------------------------------------------------
 
@@ -275,15 +286,15 @@ if ($script:UsePublicDownload) {
     }
 }
 
-# -IncludeDocker implies the agent tool chain: a container agent pulls its image
-# from GHCR, and that grant is reached with `gh`.
-$script:AgentTools = [bool]($WithAgentTools -or $IncludeDocker)
-
-# Is a GitHub identity on this machine's path at all? Two reasons only: the
-# agent tools need it for GHCR, and the private dist release needs it when no
-# public download host is configured. Everything GitHub-shaped in this script
-# hangs off this one flag.
-$script:GitHubNeeded = [bool]($script:AgentTools -or -not $script:UsePublicDownload)
+# Is a GitHub identity on this machine's path at all? One reason only: the
+# private dist release needs it when no public download host is configured.
+# Everything GitHub-shaped in this script hangs off this one flag. Until C108
+# the agent tools (-WithAgentTools, -IncludeDocker) were a second reason - the
+# GHCR grant for the agent image is reached with `gh` - but the image now comes
+# from the licensed registry with the Polaris licence, and the Dashboard signs
+# Docker in to it by itself. -WithAgentTools is kept as an accepted no-op so
+# existing command lines keep working.
+$script:GitHubNeeded = [bool](-not $script:UsePublicDownload)
 
 # --- Output helpers -----------------------------------------------------------
 
@@ -617,16 +628,16 @@ $Prerequisites = @(
         Installer = 'winget'; WingetId = 'Git.Git'; Purpose = 'plugin install + bash for hooks'
     },
     @{
-        # Installed only when GitHub is on this run's path at all, i.e. with
-        # -WithAgentTools (the GHCR grant for the agent image) or while no
-        # public download host is configured and stage 4 still uses the private
-        # dist release. GitHub.cli is a WiX MSI into Program Files, so leaving
-        # it out is the third UAC prompt gone (C091 section 1, section 13
-        # item 5).
+        # Installed only when GitHub is on this run's path at all, i.e. while
+        # no public download host is configured and stage 4 still uses the
+        # private dist release. Container agents stopped being a reason with
+        # C108: their image comes from the licensed registry with the licence.
+        # GitHub.cli is a WiX MSI into Program Files, so leaving it out is the
+        # third UAC prompt gone (C091 section 1, section 13 item 5).
         Name = 'GitHub CLI'; Command = 'gh'; VersionArg = '--version'
         Installer = 'winget'; WingetId = 'GitHub.cli'; NeedsGitHub = $true
         Purpose = 'GitHub path only: dist download, agent GHCR sign-in'
-        OptionalHint = 'nothing on this run needs GitHub - re-run with -WithAgentTools if you add container agents.'
+        OptionalHint = 'nothing on this run needs GitHub - the Dashboard, its plugin and the agent image all come with the licence.'
     },
     @{
         Name = 'Docker Desktop'; Command = 'docker'; VersionArg = '--version'
@@ -943,7 +954,7 @@ function Invoke-StagePrerequisites {
             continue
         }
         if ($def['NeedsGitHub'] -and -not $script:GitHubNeeded) {
-            Write-Skip "$($def.Name) - nothing on this run touches GitHub, pass -WithAgentTools if you add container agents"
+            Write-Skip "$($def.Name) - nothing on this run touches GitHub, container agents included"
             continue
         }
         if ($entry.Status -eq 'NotOnPath') {
@@ -983,7 +994,7 @@ function Invoke-StagePrerequisites {
     }
 
     if ($wingetWork.Count -gt 0 -and -not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw "winget not found. Install 'App Installer' from the Microsoft Store (https://aka.ms/getwinget) and re-run, or install the tools manually: Git https://git-scm.com/download/win, GitHub CLI https://cli.github.com (only with -WithAgentTools), Docker Desktop https://docs.docker.com/desktop/ (only with -IncludeDocker)."
+        throw "winget not found. Install 'App Installer' from the Microsoft Store (https://aka.ms/getwinget) and re-run, or install the tools manually: Git https://git-scm.com/download/win, GitHub CLI https://cli.github.com (GitHub path only), Docker Desktop https://docs.docker.com/desktop/ (only with -IncludeDocker)."
     }
 
     if ($DryRun) {
@@ -1226,12 +1237,14 @@ function Test-FineGrainedPat {
 function Invoke-StageGitHubAuth {
     Write-Section 'Stage 2 of 6 - GitHub sign-in'
 
-    # The whole stage exists to reach the private dist repo and GHCR. With a
-    # public download host configured and no agent tools asked for, neither is
-    # on this machine's path, so there is nothing to sign in to (C091 Move 1).
+    # The whole stage exists to reach the private dist repo and, on that path,
+    # GHCR. With a public download host configured neither is on this machine's
+    # path, so there is nothing to sign in to (C091 Move 1) - container agents
+    # included, since C108: the Dashboard signs Docker in to the licensed
+    # registry with its licence and pulls the agent image from there.
     if (-not $script:GitHubNeeded) {
         Write-Skip "Not needed - the Dashboard comes from $($script:DownloadBase) and brings its plugin with it."
-        Write-Skip 'Pass -WithAgentTools if you run agents in containers; that path needs a GitHub sign-in for the GHCR grant.'
+        Write-Skip 'Container agents need no GitHub identity either: the Dashboard signs Docker in to the licensed registry with the Polaris licence.'
         Set-StageResult 'GitHub sign-in' 'skipped (not needed on the public download path)'
         return $false
     }
@@ -1333,6 +1346,8 @@ function Invoke-StageGitHubAuth {
     }
 
     # GHCR (agents). Same token; needs Docker present and its daemon running.
+    # GitHub path only by construction - this stage is skipped on the public
+    # download path, where the agent image comes from the licensed registry.
     if (Get-Command docker -ErrorAction SilentlyContinue) {
         Write-Step 'Signing Docker in to ghcr.io (agent image)'
         $daemon = Invoke-Native -Exe 'docker' -Arguments @('info')
@@ -1767,8 +1782,15 @@ function Invoke-StageFinish {
         Write-Ok "Dashboard source: the private dist release $DistRepo - that is what stage 2's GitHub sign-in unlocks."
         Write-Skip 'Configure a public download host ($DefaultDownloadBaseUrl, or -DownloadBaseUrl) to take GitHub off this path.'
     }
-    if ($script:AgentTools) {
-        Write-Ok 'Agent tools requested (-WithAgentTools / -IncludeDocker) - the GitHub CLI and its GHCR sign-in are part of this install.'
+    if ($IncludeDocker) {
+        if ($script:UsePublicDownload) {
+            Write-Ok 'Docker Desktop requested (-IncludeDocker) - no GitHub identity is needed for agents: the Dashboard signs Docker in to the licensed registry with its licence and pulls the agent image itself.'
+        } else {
+            Write-Ok 'Docker Desktop requested (-IncludeDocker) - on the GitHub path the stage-2 sign-in also logged Docker in to GHCR for the agent image.'
+        }
+    }
+    if ($WithAgentTools) {
+        Write-Skip '-WithAgentTools changed nothing (C108): container agents need no GitHub identity. Pass -IncludeDocker for Docker Desktop.'
     }
     if (-not $script:GitHubNeeded) {
         Write-Skip 'Stages 2 and 3 were skipped: nothing on this path needs GitHub, and the Dashboard registers its bundled plugin itself on first run.'
@@ -1834,8 +1856,15 @@ if ($script:UsePublicDownload) {
 } else {
     Write-Host "Dashboard source: the private $DistRepo release (GitHub sign-in required)."
 }
-if ($script:AgentTools) {
-    Write-Host 'Agent tools requested: the GitHub CLI and the GHCR sign-in are included.'
+if ($IncludeDocker) {
+    if ($script:UsePublicDownload) {
+        Write-Host 'Docker Desktop requested: no GitHub identity is involved for agents - the Dashboard pulls the agent image from the licensed registry with its licence.'
+    } else {
+        Write-Host 'Docker Desktop requested: the stage-2 GitHub sign-in also logs Docker in to GHCR for the agent image.'
+    }
+}
+if ($WithAgentTools) {
+    Write-Host '-WithAgentTools changes nothing since C108: container agents need no GitHub identity. Pass -IncludeDocker for Docker Desktop.'
 }
 
 Invoke-StagePrerequisites
@@ -1869,8 +1898,8 @@ if ($script:FailedStages.Count -gt 0) {
 # SIG # Begin signature block
 # MIIoYAYJKoZIhvcNAQcCoIIoUTCCKE0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD27v2ApFrq74N3
-# YvZncI0Yp3zP05Hxupzq5rUNb6KwBaCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCsA1UHEQaaqTvc
+# nAo5UQG1FNZVy5B1Anhn3ADd/qUEqKCCDQowggZJMIIEMaADAgECAhARy6Iv4IFR
 # C33xpE+8TXf+MA0GCSqGSIb3DQEBCwUAMFYxCzAJBgNVBAYTAlBMMSEwHwYDVQQK
 # ExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1bSBDb2Rl
 # IFNpZ25pbmcgMjAyMSBDQTAeFw0yNjA4MTIwOTE0MDBaFw0yNzA4MTIwOTEzNTla
@@ -1944,20 +1973,20 @@ if ($script:FailedStages.Count -gt 0) {
 # byBEYXRhIFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIENvZGUgU2lnbmlu
 # ZyAyMDIxIENBAhARy6Iv4IFRC33xpE+8TXf+MA0GCWCGSAFlAwQCAQUAoHwwEAYK
 # KwYBBAGCNwIBDDECMAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYB
-# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIIcJqjENvOWW
-# 4FGdeJ75mr27H7EUTbc5QknAwUfVhV8LMA0GCSqGSIb3DQEBAQUABIIBgG4slB1O
-# +hzLlOtn/cKgSFYbxZ8voprz89N4sFJg8GInuymDpaV55toMOG4R73LehDN+TLX4
-# qD9TY8fXMar9g6CNGkXCK/b157eGFwNBrJkpvwTLfsan+zZPAa/Duh/cT0Nn6Hmx
-# wv8kjhbWVmgDgYfhroTTX0I8te+7SVrttrLD1/uISsCA1KYq1DHEhaYCAnOLYaUW
-# 6q7XHWa19Wxy5xG+3fJ4btZWtqixrtQqKihbCw0a9Gt3og3VeQEgMKhfM6dxtu4V
-# P7KjmmVZtuItXQ4+scsMMw/8zgmLv4nGp09kgayWvtK7NpvVHagTJje/v8J6DWAp
-# jQo0vj9Tdh+8q+oOCx/3BYLn2pGt0BnwseEewrnXvekU5MTnvbTnS6l/Dtyj2nfY
-# 7cfxhUzgJEXFIUnPPzgcj5gd1n/K5XHbCLHoaZ0RtRHis5hGa6MdTzKHN69HVj1W
-# BVkzLMSYfuhz4TPHS0eMKapWmafZodIV1g9fVBChnDVezdTx9+RCJfJv/KGCGBUw
+# BAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIFDlyp0NYBVq
+# Eh+qClwFLMZom5Gn8xV/ITtKkdvYE/YcMA0GCSqGSIb3DQEBAQUABIIBgIgnVKRi
+# KHatvXjRrsF+K89geSxTZb3KKHRZCw/ylwYiyT/YKIUSS0QyQMEiO36l6GP9wtQa
+# eUkcq6nF7/5MTTp0mSCKueVlgQ6LJBwxhzEmd1ygxh2sHoy3JqgJ+uzE8ymP8ew3
+# zbkzYRdjmEgbJTZZPGhpzlsA22aa3MjbvXRUpOCYC6fb06HeVMdMS6q7/L3fyVPE
+# 2ebL80gmR4Gn5s1eb3tDRBIk7l/i2GRAk8D8BmrlKoDttirZjrKBv4EcHf495VPW
+# KDvKqlz7ymjM3tzVH1yJF6nAfrvjFeveVALf6xbGf8BYenoLLLTv+KRqI8veUWVY
+# Id1rzOr+HUilbO4IKy5NaxnLC7KTtCack3mmjaNP826XkhSpl37rw/GmUOTmA6nX
+# 91AGOx0+QCbaIxBZcSB0PcyH44hYvkKo4Nc/y+CtMRJtUEODTZTXLKWr8iIkN/4+
+# S8//hMUZEq+YSkeUDvto3kcqYmXKMhQaWvWR0F5IyPsOZY0sSFzcA89s56GCGBUw
 # ghgRBgorBgEEAYI3AwMBMYIYATCCF/0GCSqGSIb3DQEHAqCCF+4wghfqAgEDMQ0w
 # CwYJYIZIAWUDBAICMIHOBgsqhkiG9w0BCRABBKCBvgSBuzCBuAIBAQYLKoRoAYb2
-# dwIFAQswMTANBglghkgBZQMEAgEFAAQgkQQr085ImTIYgklU3PvrK3WglXZcDO5k
-# C0JrSTJTy3wCBwqofHGeukQYDzIwMjYwOTE1MjEzMjQyWjADAgEBoFSkUjBQMQsw
+# dwIFAQswMTANBglghkgBZQMEAgEFAAQgqAaf3QMgcKw7ano8zRWKY+Chrb3jZGJR
+# n1fXtuS3St0CBwqofHGfnLcYDzIwMjYwOTE2MjMyMjQ2WjADAgEBoFSkUjBQMQsw
 # CQYDVQQGEwJQTDEhMB8GA1UECgwYQXNzZWNvIERhdGEgU3lzdGVtcyBTLkEuMR4w
 # HAYDVQQDDBVDZXJ0dW0gVGltZXN0YW1wIDIwMjagghMQMIIGgjCCBGqgAwIBAgIQ
 # KPB3wRw2vf5fdDJHcCcuAzANBgkqhkiG9w0BAQwFADBWMQswCQYDVQQGEwJQTDEh
@@ -2065,22 +2094,22 @@ if ($script:FailedStages.Count -gt 0) {
 # HwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMTG0NlcnR1
 # bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzANBglghkgB
 # ZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3
-# DQEJBTEPFw0yNjA5MTUyMTMyNDJaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
-# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDDR
-# uo+EG+UAM+K97+LURR/9ePjx4i7l5dLw3meysqWgCTU/w0eZfdToHdlLMhWvlPEw
+# DQEJBTEPFw0yNjA5MTYyMzIyNDZaMDcGCyqGSIb3DQEJEAIvMSgwJjAkMCIEIIW+
+# kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqGSIb3DQEJBDEyBDB3
+# XIVL62tEwgvKr2p/arMY4Fja+5Ey8O0j9b2PmFea6yEqwH93MMogKxMjufgbqosw
 # gZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha80JO+RZKUTYQ9NON
 # mDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNzZWNvIERhdGEgU3lz
 # dGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1waW5nIDIwMjEgQ0EC
-# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIAoogOKoSbxGax5UEG
-# o4GdQ6WNJlBA3t1cQcbQ3ZijSll59YqfG3AroPwNTuzGR63JWqBnhVCPkz7hzGEt
-# /tO0PUhEHqFYs1IlE88EZrIEAhsUpJAJwdJW93zpHa104oxj/db5QU0AKP51IeWc
-# ZY9yQPBzuJAFCRNnzzDVO5LW6jvONKTQOCKxV9Tw3rqFLvm1Q95220xGll0zhcNm
-# KBndsOkeS8km7mB+XqkLZB0OKf+0LK+0r9J8jjpE0AyymhfBT8aa93qIJL0vcP0u
-# AeXJEOt6PcemswKjD4umt8bo455ycW01P10XEvfqHFqaGN/JECd1/JANTcMp7LaP
-# e6inmciA3O2Ap4e7O6C/gop39X4RA6o/vcjt3YTYed7j0jzi1dMpg3UOuOOqJiKc
-# 3LYbzbjyOyycypDJolF6kcnfdAfyOfhyGZ3DIFWX+5wED7MSxqEyl/GB8SXLESl8
-# G/iQeqFVe26EuyHJ1OADjtkRcfMFq8jICltBrfnkZ5xcj+4Db0ZSf7sYDr62Er8x
-# w2O3G+YQ1tMUGeS7TGvKOdqVCX0zTl0nUjouy3p7V3q7A7F7mnzfLlRCwVkBaMnS
-# 81SmHakYOEDevh7aqvjdwuKQLf6E5OygzO70eY8WuZ49/p82bdo852xHLX6PKIYR
-# xLX3uekWDuoo2VQc2sueYcFr5tY=
+# ECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIARBeifKgalCAmsdRD
+# I3Xl2CJfiy4TDl23aDhG/oog9cGVgtIZaRrvYXEtB252254JOMQjUM/lQ94uFf5S
+# sH7q7kvZuCC+es2CEx0DLcth7X9LkpHr8rVNGpHFSndFadWrd5SPguJvtY0NCxBi
+# 1Ly2yamlxwnXD7awSJIUZUerMgw1wwMKvjREkQHPcBAL7RkXr0KBIL1h6j6iDFQW
+# 1//0hPYwsqAfciJlgb3l1HeFH4eKVu71oDSwt5cSwxXhRgGd+oumJxwGXpD5rsaK
+# 5lxtrDR04YM7hqEu74NJhKZLQrZH7+r7w8PUqcqxA4sDuVsxlx5oSePZx0ZlfxgI
+# NPkkZ9EM2Llw0NnC7uBX34vtWkWhCgll8vcpZbXYK4fV+Jp3aTH7NE7b5LeF9sxj
+# MakvppQrw6y9ER+d5phbbasAo9AA/DZFg6Z6BMv2yDYqAYr+CvdU0hn7HyA4rdNi
+# quME9xg/xBouH1gkDpxr7wA/bLBQvzfrBgENJiBwxWokveCi4hh/qkfOrbk5Jvib
+# 5G/zljx0tNCR3CzNRVxvzkX2z+fj+MXa85yDQT5Q5lKMQ5y4ZGP7uUdIzvfXeolO
+# uYPO33n9EIGaAbaa6gikg21kPsZQn9O7t5Ssrs+sQSPk6jUQ5DbgaaZ6FV+wzG7P
+# dkO9eQ8v9nPU/TB/QxehrdShPcU=
 # SIG # End signature block

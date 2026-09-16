@@ -33,7 +33,7 @@ Six idempotent stages, safe to re-run at any time:
 
 1. **Prerequisites** - Git for Windows via winget, Claude Code via its native installer. Node.js is
    detected only and never installed: the Dashboard package brings its own private copy. The GitHub
-   CLI comes only with `-WithAgentTools`, Docker Desktop only with `-IncludeDocker`.
+   CLI comes only on the GitHub path (no public download host), Docker Desktop only with `-IncludeDocker`; container agents need no GitHub identity since C108.
 2. **GitHub sign-in** - only for agent/Docker users, or while no public download host is configured.
    One browser device-flow login; the known pitfalls get guided fixes.
 3. **Polaris AI plugin** - skipped on the public download path, because the installed Dashboard bundles
@@ -61,8 +61,8 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -DryRun
 |---|---|
 | `-DryRun` | Probe only - print what every stage would do, change nothing |
 | `-DownloadBaseUrl <url>` | Fetch the Dashboard from the public download route, `https://polaris.chrisnowottny.com/download`. That is already the script's default, so pass this only to point a run somewhere else. Takes GitHub off the run entirely |
-| `-WithAgentTools` | Install the GitHub CLI and run the GitHub sign-in stage (Docker/agent users only) |
-| `-IncludeDocker` | Also install Docker Desktop and sign it in to the container registry. Implies `-WithAgentTools` |
+| `-IncludeDocker` | Also install Docker Desktop, for agents in containers. No GitHub identity comes with it: the Dashboard pulls the agent image from the licensed registry with the licence |
+| `-WithAgentTools` | Accepted and ignored since C108; container agents no longer need the GitHub CLI or the sign-in stage |
 | `-SkipClaudeCode` | Do not install Claude Code (report only) |
 | `-SkipDashboard` | Skip the Dashboard install |
 | `-SkipAnthropicSignIn` | Skip the Claude sign-in offer (IT provisioning for someone else) |
